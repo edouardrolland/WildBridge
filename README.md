@@ -19,11 +19,16 @@ This work is part of the WildDrone project, funded by the European Union's Horiz
 
 **Academic Papers**:
 ```bibtex
-@inproceedings{rolland2025wildbridge,
-    title={WildBridge: Ground Station Interface for Lightweight Multi-Drone Control and Telemetry on DJI Platforms},
-    author={Rolland, Edouard G. A. and Meier, Kilian and Bronz, Murat and Shrikhande, Aditya M. and Richardson, Tom and Lundquist, Ulrik P. S. and Christensen, Anders L.},
-    year={2025},
-    note={Submitted for publication}
+@inproceedings{Rolland2025WildBridge,
+  author    = {Edouard Rolland and Kilian Meier and Murat Bronz and Aditya Shrikhande and Tom Richardson and Ulrik Pagh Schultz Lundquist and Anders Christensen},
+  title     = {WildBridge: Ground Station Interface for Lightweight Multi-Drone Control and Telemetry on DJI Platforms},
+  booktitle = {Proceedings of the 13th International Conference on Robot Intelligence Technology and Applications (RiTA 2025)},
+  year      = {2025},
+  month = {December},
+  publisher = {Springer},
+  address   = {London, United Kingdom},
+  note      = {In press},
+  url       = {https://portal.findresearcher.sdu.dk/en/publications/wildbridge-ground-station-interface-for-lightweight-multi-drone-c},
 }
 ```
 
