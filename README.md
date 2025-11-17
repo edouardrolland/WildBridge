@@ -110,7 +110,7 @@ Based on controlled experiments with consumer-grade hardware:
    - Register as a DJI developer and get an API key: [https://developer.dji.com/](https://developer.dji.com/)
    - Past your API key in:
      ```
-     WildBridge/WildBridgeApp/android-sdk-v5-as/local.properties 
+     WildBridge/WildBridgeApp/android-sdk-v5-as/gradle.properties 
      ```
      ```
      AIRCRAFT_API_KEY="App key"
