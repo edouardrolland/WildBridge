@@ -32,6 +32,7 @@ import dji.sdk.keyvalue.value.common.Velocity3D
 import dji.sdk.keyvalue.value.flightcontroller.VirtualStickFlightControlParam
 import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotation
 import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotationMode
+import dji.sdk.keyvalue.value.flightcontroller.LowBatteryRTHInfo
 import dji.v5.common.callback.CommonCallbacks
 import dji.v5.common.error.IDJIError
 import dji.v5.et.action
@@ -441,6 +442,9 @@ class VirtualStickFragment : DJIFragment() {
                     "/status/yawReached" -> if (DroneController.isYawReached()) "true" else "false"
                     "/status/altitudeReached" -> if (DroneController.isAltitudeReached()) "true" else "false"
                     "/status/camera/isRecording" -> isRecording.get().toString()
+                    "/aircraft/lowBatteryRTHInfo/remainingFlightTime" -> getLowBatteryRTHInfo().remainingFlightTime.toString()
+                    "/aircraft/lowBatteryRTHInfo/timeNeededToGoHome" -> getLowBatteryRTHInfo().timeNeededToGoHome.toString()
+                    "/aircraft/lowBatteryRTHInfo/maxRadiusCanFlyAndGoHome" -> getLowBatteryRTHInfo().maxRadiusCanFlyAndGoHome.toString()
                     else -> "Not Found"
                 }
             } catch (e: Exception) {
@@ -706,6 +710,9 @@ class VirtualStickFragment : DJIFragment() {
 
     private val batteryKey: DJIKey<Int> = BatteryKey.KeyChargeRemainingInPercent.create()
     private fun getBatteryLevel(): Int = batteryKey.get(-1)
+
+    private val lowBatteryRTHInfoKey: DJIKey<LowBatteryRTHInfo> = FlightControllerKey.KeyLowBatteryRTHInfo.create()
+    private fun getLowBatteryRTHInfo(): LowBatteryRTHInfo = lowBatteryRTHInfoKey.get(LowBatteryRTHInfo())
 
     // Get device IP address
     private val deviceIp: String? by lazy {
