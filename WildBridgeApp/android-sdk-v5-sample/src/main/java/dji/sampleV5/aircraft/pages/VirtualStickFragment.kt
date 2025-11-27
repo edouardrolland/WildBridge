@@ -398,15 +398,16 @@ class VirtualStickFragment : DJIFragment() {
                     }
                     "/send/gotoWPwithPID" -> {
                         val cmd = postData.split(",")
-                        if (cmd.size < 4) {
-                            return "Invalid input. Expected format: lat,lon,alt,yaw"
+                        if (cmd.size < 5) {
+                            return "Invalid input. Expected format: lat,lon,alt,yaw,maxSpeed"
                         }
                         val latitude = cmd[0].toDouble()
                         val longitude = cmd[1].toDouble()
                         val altitude = cmd[2].toDouble()
                         val yaw = cmd[3].toDouble()
-                        DroneController.navigateToWaypointWithPID(latitude, longitude, altitude, yaw)
-                        "Waypoint command received: Latitude=$latitude, Longitude=$longitude, Altitude=$altitude, Yaw=$yaw"
+                        val maxSpeed = cmd[4].toDouble()
+                        DroneController.navigateToWaypointWithPID(latitude, longitude, altitude, yaw, maxSpeed)
+                        "Waypoint command received: Latitude=$latitude, Longitude=$longitude, Altitude=$altitude, Yaw=$yaw, MaxSpeed=$maxSpeed"
                     }
                     "/send/navigateTrajectory" -> {
                         Log.d("DroneServer", "Received trajectory data: $postData")

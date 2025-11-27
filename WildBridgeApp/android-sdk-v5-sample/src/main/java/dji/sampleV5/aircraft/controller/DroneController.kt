@@ -388,10 +388,9 @@ object DroneController {
         })
     }
 
-    fun navigateToWaypointWithPID(targetLatitude: Double, targetLongitude: Double, targetAlt: Double, targetYaw: Double) {
+    fun navigateToWaypointWithPID(targetLatitude: Double, targetLongitude: Double, targetAlt: Double, targetYaw: Double, maxSpeed: Double) {
 
         val updateInterval = 100.0  // Update every 100 ms
-        val maxSpeed = 5.0 // meters per second
         val maxYawRate = 30.0 // degrees per second
 
         virtualStickVM.enableVirtualStickAdvancedMode()
