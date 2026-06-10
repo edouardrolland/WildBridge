@@ -1,0 +1,69 @@
+# Standalone MediaMTX relay for WildBridge — RTSP/WHIP/WHEP, no dashboard.
+#
+# Pass the drone IPs as a parameter and bring it up:
+#
+#   DRONE_IPS="192.168.1.50 192.168.1.51" docker compose -f compose.mediamtx.yaml up
+#
+# (comma- or space-separated; or put DRONE_IPS=... in a .env file next to this file)
+#
+# How it works: WildBridge phones PUBLISH video via WHIP — but a phone only starts
+# publishing once a client connects to its telemetry port (8081), and it publishes to
+# whoever connected, under its configured DRONE NAME. This stack, for each drone IP:
+#   1. holds a telemetry connection open so the phone pushes its camera to THIS host, then
+#   2. republishes that <drone_name> path to a <drone_ip> path (ffmpeg -c copy, no
+#      transcode), so each feed is reachable by IP:
+#
+#   RTSP : rtsp://<this-host>:8554/<drone_ip>            e.g. rtsp://host:8554/192.168.1.50
+#   WHEP : http://<this-host>:8889/<drone_ip>/whep       (browser playback)
+#
+# The original <drone_name> path still exists (it is the WHIP ingest, used by the video
+# dashboard); the <drone_ip> path is an additional alias. Leave DRONE_IPS empty to run a
+# pure relay (phones must then be triggered some other way, e.g. the in-app
+# "Set WHIP Server" plus any telemetry consumer).
+
+services:
+  mediamtx:
+    # -ffmpeg tag is Alpine-based (has sh + nc), needed for the telemetry trigger below.
+    # The default (scratch) image has no shell.
+    image: bluenviron/mediamtx:latest-ffmpeg
+    container_name: wildbridge_mediamtx
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      - MTX_WEBRTCLOCALUDPADDRESS=${MEDIAMTX_WEBRTC_UDP_ADDRESS:-:8189}
+      - DRONE_IPS=${DRONE_IPS:-}
+      - TELEMETRY_PORT=${TELEMETRY_PORT:-8081}
+      - HTTP_PORT=${HTTP_PORT:-8080}
+    volumes:
+      - ./GroundStation/video_test/mediamtx.yml:/mediamtx.yml:ro
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -u
+        ips=$$(echo "$${DRONE_IPS:-}" | tr ',;' '  ')
+        for ip in $$ips; do
+          [ -z "$$ip" ] && continue
+          echo "[wildbridge] drone $$ip  ->  rtsp://<this-host>:8554/$$ip"
+          # (1) Telemetry trigger: hold a connection to :TELEMETRY_PORT open so the phone
+          # keeps publishing WHIP to us (under its drone name). tail -f keeps nc's stdin
+          # open; reconnect 2s after any drop / phone reboot.
+          ( while true; do
+              tail -f /dev/null 2>/dev/null | nc "$$ip" "$${TELEMETRY_PORT}" >/dev/null 2>&1
+              sleep 2
+            done ) &
+          # (2) IP alias: discover the drone name (GET <ip>:HTTP_PORT/config), then
+          # republish <name> -> <ip> with no transcode so the feed is reachable by IP.
+          # Retries every 3s until the phone is actually publishing.
+          ( while true; do
+              name=$$(wget -qO- "http://$$ip:$${HTTP_PORT}/config" 2>/dev/null \
+                      | sed -n 's/.*"droneName":"\([^"]*\)".*/\1/p')
+              if [ -n "$$name" ] && [ "$$name" != "$$ip" ]; then
+                ffmpeg -hide_banner -loglevel error -rtsp_transport tcp \
+                  -i "rtsp://127.0.0.1:8554/$$name" -c copy \
+                  -f rtsp -rtsp_transport tcp "rtsp://127.0.0.1:8554/$$ip" >/dev/null 2>&1
+              fi
+              sleep 3
+            done ) &
+        done
+        exec /mediamtx /mediamtx.yml

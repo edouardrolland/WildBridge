@@ -70,6 +70,10 @@ class PayloadWidgetVM : DJIViewModel() {
 
     override fun onCleared() {
         super.onCleared()
+        // payloadIndexType is only set in initListener(); if the VM is cleared before any
+        // listener was registered (e.g. activity destroyed without ever calling /send/drop),
+        // there is nothing to unregister and the lateinit would otherwise throw.
+        if (!::payloadIndexType.isInitialized) return
         val iPayloadManager = payloadManagerMap[payloadIndexType]
         iPayloadManager?.removePayloadWidgetInfoListener(payloadWidgetInfoListener)
         iPayloadManager?.removePayloadBasicInfoListener(payloadBasicInfoListener)

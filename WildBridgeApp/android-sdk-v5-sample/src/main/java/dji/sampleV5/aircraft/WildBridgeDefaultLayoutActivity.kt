@@ -47,6 +47,7 @@ import dji.v5.ux.detection.DetectionOverlayView
 import dji.sampleV5.aircraft.logger.WildBridgeFlightLogger
 import dji.sampleV5.aircraft.models.BasicAircraftControlVM
 import dji.sampleV5.aircraft.models.MediaVM
+import dji.sampleV5.aircraft.models.PayloadWidgetVM
 import dji.sampleV5.aircraft.models.VirtualStickVM
 import dji.sampleV5.aircraft.server.TelemetryServer
 import dji.sampleV5.aircraft.webrtc.WebRTCMediaOptions
@@ -174,6 +175,7 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
     private lateinit var basicAircraftControlVM: BasicAircraftControlVM
     private lateinit var virtualStickVM: VirtualStickVM
     private lateinit var mediaVM: MediaVM
+    private lateinit var payloadWidgetVM: PayloadWidgetVM
     
     // Servers
     private var httpServer: SimpleHttpServer? = null
@@ -372,6 +374,9 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
         mediaVM.init()
         mediaVM.setStorage(CameraStorageLocation.SDCARD)
         mediaVM.setComponentIndex(ComponentIndexType.LEFT_OR_MAIN)
+
+        // PayloadWidgetVM drives the payload-release servo for the /send/drop endpoint.
+        payloadWidgetVM = ViewModelProvider(this)[PayloadWidgetVM::class.java]
 
         // Start listening for RC stick inputs (needed for manual override detection)
         virtualStickVM.listenRCStick()
@@ -656,6 +661,7 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
         val controlProfile = DroneControlProfiles.fromProductType(productType)
         val controlLabel = when (controlProfile) {
             DroneControlProfile.MATRICE_350_RTK -> "CTRL M350"
+            DroneControlProfile.MATRICE_400 -> "CTRL M400"
             DroneControlProfile.MINI_4_PRO -> "CTRL MINI4"
             DroneControlProfile.MAVIC_3_ENTERPRISE -> "CTRL MAVIC3"
         }
@@ -1370,6 +1376,21 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
     override fun onDestroy() {
         detachDefaultLayoutHsiWidgets()
 
+        // Unregister system-service listeners FIRST and each on its own guard. The framework
+        // LocationManager keeps locationListener in a native global, so if a later teardown
+        // step throws and skips this removal, the listener pins the destroyed activity
+        // (~8.5 MB leak caught by LeakCanary). These must not depend on the block below.
+        try {
+            locationManager?.removeUpdates(locationListener)
+        } catch (e: Exception) {
+            Log.w(TAG, "Error removing location updates: ${e.message}")
+        }
+        try {
+            sensorManager?.unregisterListener(sensorListener)
+        } catch (e: Exception) {
+            Log.w(TAG, "Error unregistering sensor listener: ${e.message}")
+        }
+
         try {
             // Stop AutoSensing
             stopAutoSensing()
@@ -1390,11 +1411,7 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
             // Unregister mDNS service
             unregisterMdnsService()
 
-            // Stop location updates
-            locationManager?.removeUpdates(locationListener)
-
-            // Stop sensor updates
-            sensorManager?.unregisterListener(sensorListener)
+            // (location + sensor listeners already unregistered at the top of onDestroy)
 
             // Release Multicast Lock
             if (multicastLock?.isHeld == true) {
@@ -2231,6 +2248,20 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
                             else "[${target.latitude}, ${target.longitude}, ${target.altitude}]"
                         val stateJson = if (state == null) "null" else "\"$state\""
                         "{\"distance\": ${distance ?: "null"}, \"target\": $targetJson, \"state\": $stateJson}"
+                    }
+                    // --- Payload drop (release servo) ---
+                    "/send/drop" -> {
+                        // The payload port depends on the airframe; the detected control profile
+                        // carries it (PORT_3 on M350/M3E, null where no droppable payload exists).
+                        val profile = DroneControlProfiles.activeProfile()
+                        val indexType = profile.payloadIndexType
+                        if (indexType == null) {
+                            "REJECTED: ${profile.displayName} has no payload drop port configured."
+                        } else if (Payload.dropPayload(payloadWidgetVM, indexType)) {
+                            "Payload dropped on $indexType"
+                        } else {
+                            "Payload drop failed"
+                        }
                     }
                     else -> "Not Found: $uri"
                 }

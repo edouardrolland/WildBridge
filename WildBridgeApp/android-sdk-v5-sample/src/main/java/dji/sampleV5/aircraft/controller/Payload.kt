@@ -4,6 +4,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import dji.sampleV5.aircraft.models.MediaVM
+import dji.sampleV5.aircraft.models.PayloadWidgetVM
 import dji.sampleV5.aircraft.util.ToastUtils
 import dji.sdk.keyvalue.key.CameraKey
 import dji.sdk.keyvalue.key.DJIKey
@@ -19,8 +20,11 @@ import dji.v5.et.get
 import dji.v5.et.listen
 import dji.v5.et.set
 import dji.v5.manager.KeyManager
+import dji.v5.manager.aircraft.payload.PayloadIndexType
 import dji.v5.manager.datacenter.media.MediaFile
 import dji.v5.manager.datacenter.media.MediaFileDownloadListener
+import dji.sdk.keyvalue.value.payload.WidgetType
+import dji.sdk.keyvalue.value.payload.WidgetValue
 import dji.v5.utils.common.ContextUtil
 import dji.v5.utils.common.DiskUtil
 import java.io.BufferedOutputStream
@@ -339,6 +343,57 @@ object Payload {
         outputStream.flush()
     }
 
+    // ==================== Payload drop (release servo) ====================
+
+    // The PayloadIndexType the widget VM is currently wired to. initListener() must run once
+    // before setWidgetValue() (it sets a lateinit field in the VM); we re-register only when
+    // the port changes so repeated drops don't stack duplicate payload listeners.
+    @Volatile
+    private var dropListenerIndex: PayloadIndexType? = null
+
+    // Fire the payload release on [indexType], reproducing the manual widget sequence:
+    // arm the SWITCH (index 0), pulse the release BUTTON (index 1) on then off, then disarm.
+    // The 300 ms gaps let the payload firmware register each discrete widget change.
+    // Blocking, call from a worker thread. payloadWidgetVM must be obtained from the host
+    // activity via ViewModelProvider (created on the main thread).
+    fun dropPayload(payloadWidgetVM: PayloadWidgetVM, indexType: PayloadIndexType): Boolean {
+        return try {
+            if (dropListenerIndex != indexType) {
+                payloadWidgetVM.initListener(indexType)
+                dropListenerIndex = indexType
+            }
+
+            val armSwitch = WidgetValue().apply {
+                type = WidgetType.SWITCH
+                index = 0
+                value = 1
+            }
+            payloadWidgetVM.setWidgetValue(armSwitch)
+            Thread.sleep(300)
+
+            val releaseButton = WidgetValue().apply {
+                type = WidgetType.BUTTON
+                index = 1
+                value = 1
+            }
+            payloadWidgetVM.setWidgetValue(releaseButton)
+            Thread.sleep(300)
+
+            releaseButton.value = 0
+            payloadWidgetVM.setWidgetValue(releaseButton)
+            Thread.sleep(300)
+
+            armSwitch.value = 0
+            payloadWidgetVM.setWidgetValue(armSwitch)
+
+            Log.i(TAG, "Payload drop sequence sent on $indexType")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Payload drop failed: ${e.message}", e)
+            false
+        }
+    }
+
     // Cancel payload key listeners. Call from the host activity's onDestroy.
     fun destroy() {
         KeyManager.getInstance().cancelListen(this)
@@ -346,5 +401,6 @@ object Payload {
         lrfInfo = null
         newMediaListenerRegistered = false
         latestGeneratedMediaInfo = null
+        dropListenerIndex = null
     }
 }
