@@ -40,6 +40,7 @@ import android.hardware.SensorManager
 import android.net.wifi.WifiManager
 import android.os.BatteryManager
 import androidx.core.app.ActivityCompat
+import dji.sampleV5.aircraft.controller.ControlAuthority
 import dji.sampleV5.aircraft.controller.DroneController
 import dji.sampleV5.aircraft.controller.Payload
 import dji.v5.ux.detection.DetectedTarget
@@ -134,6 +135,8 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
         private const val MEDIAMTX_WHIP_PORT = 8889  // mediamtx WebRTC port for WHIP publish
         private const val PREF_DRONE_NAME = "drone_name"
         private const val PREF_MEDIAMTX_SERVER = "mediamtx_server"
+        private const val SAFETY_TOKEN = "98"
+        private const val SAFETY_TOKEN_HEADER = "X-Safety-Token:"
         private const val PREF_WEBRTC_FPS = "webrtc_fps"
         private const val PREF_WEBRTC_RESOLUTION = "webrtc_resolution"
         private const val PREF_MOCK_VIDEO_ENABLED = "mock_video_enabled"
@@ -406,6 +409,9 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
         // Setup drone status indicator
         setupDroneStatusView()
 
+        // Setup Pilot/Safety authority banner
+        setupControlAuthorityBanner()
+
         // Initialize LocationManager from the APPLICATION context. The framework can keep the
         // LocationManager's transport in a native global after removeUpdates(); if the manager
         // were bound to the activity context, its mContext would then pin the destroyed activity
@@ -486,6 +492,45 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
     }
 
     // ==================== End Mode Toggle ====================
+
+    // ==================== Pilot / Safety Authority ====================
+
+    /**
+     * Classify an incoming HTTP request by its X-Safety-Token header.
+     * A request is [ControlAuthority.Source.SAFETY] only when a safety token is configured AND
+     * the request presents exactly that token; otherwise it is the Pilot Computer.
+     */
+    private fun classifyCommandSource(presentedToken: String?): ControlAuthority.Source {
+        return if (presentedToken == SAFETY_TOKEN)
+            ControlAuthority.Source.SAFETY
+        else
+            ControlAuthority.Source.PILOT
+    }
+
+    private fun setupControlAuthorityBanner() {
+        ControlAuthority.listener = object : ControlAuthority.Listener {
+            override fun onAuthorityChanged(authority: ControlAuthority.Authority) {
+                mainHandler.post { updateControlAuthorityBanner(authority) }
+            }
+        }
+        updateControlAuthorityBanner(ControlAuthority.active)
+    }
+
+    private fun updateControlAuthorityBanner(authority: ControlAuthority.Authority) {
+        val tv = findViewById<TextView>(R.id.text_control_authority) ?: return
+        when (authority) {
+            ControlAuthority.Authority.PILOT -> {
+                tv.text = "PILOT COMPUTER IN CONTROL"
+                tv.setTextColor(0xFF2196F3.toInt())  // blue
+            }
+            ControlAuthority.Authority.SAFETY -> {
+                tv.text = "SAFETY COMPUTER IN CONTROL"
+                tv.setTextColor(0xFFF44336.toInt())  // red
+            }
+        }
+    }
+
+    // ==================== End Pilot / Safety Authority ====================
 
     private fun buildWebRTCOptions(): WebRTCMediaOptions {
         val preset = getWebRTCResolutionPreset()
@@ -1446,6 +1491,7 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
             // Clean up DroneController listeners and resources
             DroneController.manualOverrideListener = null
             DroneController.droneStatusListener = null
+            ControlAuthority.listener = null
             DroneController.destroy()
 
             // Close the active flight log if the app is killed mid-flight
@@ -1978,12 +2024,19 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
                 val uri = parts[1]
 
                 var contentLength = 0
+                var safetyToken: String? = null
                 var line: String?
                 while (reader.readLine().also { line = it } != null && line!!.isNotEmpty()) {
                     if (line!!.startsWith("Content-Length:", ignoreCase = true)) {
                         contentLength = line!!.substring(15).trim().toIntOrNull() ?: 0
+                    } else if (line!!.startsWith(SAFETY_TOKEN_HEADER, ignoreCase = true)) {
+                        safetyToken = line!!.substring(SAFETY_TOKEN_HEADER.length).trim()
                     }
                 }
+
+                // A request is from the Safety Computer iff it carries the configured token.
+                // Everything else (including a token mismatch) is treated as the Pilot Computer.
+                val source = classifyCommandSource(safetyToken)
 
                 var postData = ""
                 if (method == "POST" && contentLength > 0) {
@@ -1997,6 +2050,11 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
                 if (method == "POST" && uri == "/send/captureThermalImage") {
                     WildBridgeFlightLogger.logCommand(uri, postData)
                     val outputStream = clientSocket.getOutputStream()
+                    if (!ControlAuthority.authorizeControlCommand(source)) {
+                        Payload.sendErrorResponse(outputStream, "REJECTED: Safety Computer is in control.")
+                        clientSocket.close()
+                        return
+                    }
                     val photoFile = Payload.takeThermalImage(mediaVM)
                     if (photoFile != null) {
                         Payload.sendMediaFile(photoFile, outputStream)
@@ -2007,7 +2065,7 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
                     return
                 }
 
-                val response = handleHttpRequest(method, uri, postData)
+                val response = handleHttpRequest(method, uri, postData, source)
 
                 writer.println("HTTP/1.1 200 OK")
                 writer.println("Content-Type: text/plain")
@@ -2025,9 +2083,14 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
             }
         }
 
-        private fun handleHttpRequest(method: String, uri: String, postData: String): String {
+        private fun handleHttpRequest(
+            method: String,
+            uri: String,
+            postData: String,
+            source: ControlAuthority.Source
+        ): String {
             return when (method) {
-                "POST" -> handlePostRequest(uri, postData)
+                "POST" -> handlePostRequest(uri, postData, source)
                 "GET" -> handleGetRequest(uri)
                 "OPTIONS" -> "OK"
                 else -> "Method Not Allowed"
@@ -2044,9 +2107,29 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
             }
         }
 
-        private fun handlePostRequest(uri: String, postData: String): String {
+        private fun handlePostRequest(
+            uri: String,
+            postData: String,
+            source: ControlAuthority.Source
+        ): String {
             return try {
                 Log.i("DroneServer", "POST $uri with data: $postData")
+
+                // --- Pilot/Safety authority gate ---
+                // Explicit return of control to the Pilot — Safety Computer only.
+                if (uri == "/releaseSafetyControl") {
+                    return if (ControlAuthority.releaseSafetyControl(source))
+                        "Safety control released. Pilot Computer is back in control."
+                    else
+                        "REJECTED: only the Safety Computer can release safety control."
+                }
+                // Every drone-control command (/send/*) goes through the authority latch:
+                // the first Safety command seizes persistent control; Pilot commands are
+                // rejected while the Safety Computer holds it.
+                if (uri.startsWith("/send/") && !ControlAuthority.authorizeControlCommand(source)) {
+                    return "REJECTED: Safety Computer is in control. Pilot commands are blocked."
+                }
+
                 when (uri) {
                     "/send/takeoff" -> {
                         DroneController.startTakeOff()
