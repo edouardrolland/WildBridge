@@ -138,8 +138,8 @@ DRONE_PROFILES = {
 }
 
 # Tunable test geometry (overridable via CLI).
-DEFAULT_TEST_ALT_AGL = 80.0      # metres above takeoff point
-DEFAULT_LEG_DISTANCE = 300.0    # metres travelled in the waypoint test
+DEFAULT_TEST_ALT_AGL = 40.0      # metres above takeoff point
+DEFAULT_LEG_DISTANCE = 100.0    # metres travelled in the waypoint test
 GIMBAL_TEST_PITCH = -45.0      # degrees (camera tilts down)
 GIMBAL_TEST_YAW = 30.0         # degrees
 YAW_TEST_DELTA = 90.0          # degrees added to current heading
@@ -147,6 +147,7 @@ YAW_TEST_DELTA = 90.0          # degrees added to current heading
 # Polling / tolerances.
 TELEMETRY_WARMUP_S = 2.0
 PHASE_TIMEOUT_S = 60.0         # max wait for a single phase goal
+TAKEOFF_TIMEOUT_S = 120.0      # allow extra time for motors/spool-up/liftoff
 POLL_INTERVAL_S = 0.2
 ALT_TOLERANCE_M = 1.0
 GIMBAL_TOLERANCE_DEG = 2.0
@@ -316,7 +317,7 @@ def phase1_takeoff(dji, rec):
         return None
     climbed = wait_for(
         lambda: dji.getLocation().get("altitude", start_alt) - start_alt >= TAKEOFF_MIN_CLIMB_M,
-        timeout=PHASE_TIMEOUT_S,
+        timeout=TAKEOFF_TIMEOUT_S,
         on_tick=lambda: print(f"      alt={dji.getLocation().get('altitude'):.2f} m", end="\r"))
     cur_alt = dji.getLocation().get("altitude", start_alt)
     rec.record("requestSendTakeOff", climbed, f"start={start_alt:.2f} -> {cur_alt:.2f} m")
@@ -530,7 +531,7 @@ def run_test_flight(dji, profile, alt_agl, leg_distance, auto, rec, bearing=0.0)
 def main():
     parser = argparse.ArgumentParser(description="WildBridge drone behaviour test flight")
     parser.add_argument("ip", nargs="?", default="", help="RC/app IP (omit to auto-discover)")
-    parser.add_argument("--drone", default="M400", choices=sorted(DRONE_PROFILES.keys()),
+    parser.add_argument("--drone", default="M300", choices=sorted(DRONE_PROFILES.keys()),
                         help="connected aircraft (selects max speed / payload). Default: M400")
     parser.add_argument("--auto", action="store_true",
                         help="skip per-phase confirmation prompts (use with extreme care)")

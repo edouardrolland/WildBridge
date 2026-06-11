@@ -45,13 +45,13 @@ from satellite_map_gui import SatelliteMapGUI  # noqa: E402
 # ===========================================================================
 #  EDIT THESE FOR YOUR FLIGHT
 # ===========================================================================
-IP_RC = "192.168.0.115"   # RC / app IP address
-DRONE = "M400"            # one of: M300, M350, M400, MAVIC3, MINI4
+IP_RC = "192.168.0.113"   # RC / app IP address
+DRONE = "M300"            # one of: M300, M350, M400, MAVIC3, MINI4
 # ===========================================================================
 
 # Map / safety defaults (operator defaults to Nenana, Alaska via waypoint_gui).
 BUFFER_M = 15.0           # keep-out radius around the operator (m)
-MAX_RANGE_M = 80.0        # map extent / reference range ring (m)
+MAX_RANGE_M = 100.0        # map extent / reference range ring (m)
 
 
 class RecordingDJIInterface(DJIInterface):
