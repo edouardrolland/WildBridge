@@ -351,12 +351,23 @@ object Payload {
     @Volatile
     private var dropListenerIndex: PayloadIndexType? = null
 
-    // Fire the payload release on [indexType], reproducing the manual widget sequence:
-    // arm the SWITCH (index 0), pulse the release BUTTON (index 1) on then off, then disarm.
+    // Fire the payload release on [indexType], reproducing the manual main-interface widget
+    // sequence: arm the unlock SWITCH, pulse the release BUTTON on then off, then re-lock.
     // The 300 ms gaps let the payload firmware register each discrete widget change.
+    //
+    // [armSwitchIndex]/[releaseButtonIndex] are payload widgetIndex values supplied by the
+    // active DroneControlProfile. The original working PORT_3 logic (M400/M3E/M350) is
+    // SWITCH 0 + BUTTON 1; the M300 SkyPort payload (TH4) uses Unlock SWITCH 3 + All_Down
+    // BUTTON 5.
+    //
     // Blocking, call from a worker thread. payloadWidgetVM must be obtained from the host
     // activity via ViewModelProvider (created on the main thread).
-    fun dropPayload(payloadWidgetVM: PayloadWidgetVM, indexType: PayloadIndexType): Boolean {
+    fun dropPayload(
+        payloadWidgetVM: PayloadWidgetVM,
+        indexType: PayloadIndexType,
+        armSwitchIndex: Int = 0,
+        releaseButtonIndex: Int = 2
+    ): Boolean {
         return try {
             if (dropListenerIndex != indexType) {
                 payloadWidgetVM.initListener(indexType)
@@ -365,7 +376,7 @@ object Payload {
 
             val armSwitch = WidgetValue().apply {
                 type = WidgetType.SWITCH
-                index = 0
+                index = armSwitchIndex
                 value = 1
             }
             payloadWidgetVM.setWidgetValue(armSwitch)
@@ -373,7 +384,7 @@ object Payload {
 
             val releaseButton = WidgetValue().apply {
                 type = WidgetType.BUTTON
-                index = 1
+                index = releaseButtonIndex
                 value = 1
             }
             payloadWidgetVM.setWidgetValue(releaseButton)
@@ -386,7 +397,7 @@ object Payload {
             armSwitch.value = 0
             payloadWidgetVM.setWidgetValue(armSwitch)
 
-            Log.i(TAG, "Payload drop sequence sent on $indexType")
+            Log.i(TAG, "Payload drop sequence sent on $indexType (switch=$armSwitchIndex, button=$releaseButtonIndex)")
             true
         } catch (e: Exception) {
             Log.e(TAG, "Payload drop failed: ${e.message}", e)

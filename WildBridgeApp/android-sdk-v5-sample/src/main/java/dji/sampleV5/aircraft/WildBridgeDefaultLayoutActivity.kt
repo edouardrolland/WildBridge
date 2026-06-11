@@ -660,6 +660,7 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
     private fun applyDetectedDroneProfile(productType: ProductType) {
         val controlProfile = DroneControlProfiles.fromProductType(productType)
         val controlLabel = when (controlProfile) {
+            DroneControlProfile.MATRICE_300_RTK -> "CTRL M300"
             DroneControlProfile.MATRICE_350_RTK -> "CTRL M350"
             DroneControlProfile.MATRICE_400 -> "CTRL M400"
             DroneControlProfile.MINI_4_PRO -> "CTRL MINI4"
@@ -2251,13 +2252,19 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
                     }
                     // --- Payload drop (release servo) ---
                     "/send/drop" -> {
-                        // The payload port depends on the airframe; the detected control profile
-                        // carries it (PORT_3 on M350/M3E, null where no droppable payload exists).
+                        // The detected control profile carries the payload index and the drop
+                        // widget indices (RIGHT + Unlock 3 / All_Down 5 on the M300 SkyPort payload;
+                        // PORT_3 + SWITCH 0 / BUTTON 1 elsewhere; null where no droppable payload
+                        // exists). dropPayload pulses the unlock SWITCH then the release BUTTON.
                         val profile = DroneControlProfiles.activeProfile()
                         val indexType = profile.payloadIndexType
                         if (indexType == null) {
                             "REJECTED: ${profile.displayName} has no payload drop port configured."
-                        } else if (Payload.dropPayload(payloadWidgetVM, indexType)) {
+                        } else if (Payload.dropPayload(
+                                payloadWidgetVM, indexType,
+                                profile.dropArmSwitchIndex, profile.dropReleaseButtonIndex
+                            )
+                        ) {
                             "Payload dropped on $indexType"
                         } else {
                             "Payload drop failed"
