@@ -68,15 +68,10 @@ object DroneController {
     const val WP_ACCEPT_ALTITUDE_M = 0.5    // vertical error in meters
     const val WP_ACCEPT_YAW_DEG = 4.0       // yaw error in degrees
 
-    // Limit how quickly autonomous waypoint control can increase horizontal
-    // speed. DJI Virtual Stick velocity mode accepts m/s setpoints directly,
-    // so jumping from 0 to the saturated target speed feels like an initial
-    // lunge, especially on lighter aircraft such as Mini 4 Pro.
-    private const val MAX_HORIZONTAL_ACCEL_MPS2 = 0.5
-
     private fun distancePidKp(): Double = DroneControlProfiles.activeProfile().distanceKp
     private fun yawPidKp(): Double = DroneControlProfiles.activeProfile().yawKp
     private fun waypointPidOutputLimit(): Double = DroneControlProfiles.activeProfile().maxHorizontalSpeedMps
+    private fun maxHorizontalAccelMps2(): Double = DroneControlProfiles.activeProfile().maxHorizontalAccelMps2
 
     // Listener interface so the UI can react to automatic activation
     interface ManualOverrideListener {
@@ -787,7 +782,7 @@ object DroneController {
                 val yawErrorFactor = max(0f, 1f - (abs(yawError) / maxYawError).toFloat())
                 speed *= yawErrorFactor
 
-                val maxSpeedStep = (MAX_HORIZONTAL_ACCEL_MPS2 * (updateInterval / 1000.0)).toFloat()
+                val maxSpeedStep = (maxHorizontalAccelMps2() * (updateInterval / 1000.0)).toFloat()
                 speed = speed.coerceAtMost(lastCommandedSpeed + maxSpeedStep)
                 lastCommandedSpeed = speed
 
@@ -888,7 +883,7 @@ object DroneController {
 
                 val distance = calculateDistance(target.latitude, target.longitude, currentPosition.latitude, currentPosition.longitude)
                 val pidSpeed = distancePID.update(distance).coerceAtMost(target.maxSpeed)
-                val maxSpeedStep = MAX_HORIZONTAL_ACCEL_MPS2 * (updateInterval / 1000.0)
+                val maxSpeedStep = maxHorizontalAccelMps2() * (updateInterval / 1000.0)
                 val targetSpeed = pidSpeed.coerceAtMost(lastCommandedSpeed + maxSpeedStep)
                 lastCommandedSpeed = targetSpeed
                 val movementDirection = calculateBearing(currentPosition.latitude, currentPosition.longitude, target.latitude, target.longitude).toDouble()
@@ -1090,7 +1085,7 @@ object DroneController {
                 val yawErrorFactor = max(0.35, 1.0 - (abs(yawError) / 45.0))
                 targetSpeed *= yawErrorFactor
 
-                val maxSpeedStep = MAX_HORIZONTAL_ACCEL_MPS2 * (updateIntervalMs / 1000.0)
+                val maxSpeedStep = maxHorizontalAccelMps2() * (updateIntervalMs / 1000.0)
                 targetSpeed = targetSpeed.coerceAtMost(lastCommandedSpeed + maxSpeedStep)
                 lastCommandedSpeed = targetSpeed
 

@@ -35,10 +35,18 @@ class WhipPublisher(
     companion object {
         private const val TAG = "WhipPublisher"
         private const val ICE_GATHER_TIMEOUT_S = 10L
-        private const val RECONNECT_BASE_DELAY_MS = 2000L
+        private const val RECONNECT_BASE_DELAY_MS = 3000L
         private const val RECONNECT_MAX_DELAY_MS = 30000L
         private const val FIRST_FRAME_TIMEOUT_MS = 8_000L
         private const val FIRST_FRAME_RECOVERY_TIMEOUT_MS = 4_000L
+        // Stop retrying after this many consecutive failures. Endless connect ->
+        // fail -> teardown cycling repeatedly creates/disposes native WebRTC
+        // PeerConnections, which destabilises libjingle and eventually crashes it
+        // (SIGSEGV on the signaling thread). Giving up lets the process stay alive;
+        // a later telemetry client can restart publishing via WebRTCStreamer.
+        private const val MAX_CONSECUTIVE_FAILURES = 6
+        // How long stop() waits for the publish thread to finish its own teardown.
+        private const val STOP_AWAIT_TIMEOUT_S = 5L
     }
 
     private val appContext = context.applicationContext
@@ -77,9 +85,21 @@ class WhipPublisher(
         val wasRunning = isRunning.getAndSet(false)
         listener = null
         mainHandler.removeCallbacksAndMessages(null)
+        // Interrupt the publish loop and let IT run teardown() in its finally block,
+        // i.e. on the executor thread that created the native WebRTC objects. We must
+        // NOT dispose them from this (caller) thread while the loop is still polling
+        // iceConnectionState() — that cross-thread access into a half-disposed
+        // PeerConnection is a crash. We only force a fallback teardown if the loop
+        // is wedged and never terminates.
         executor.shutdownNow()
         if (wasRunning) {
-            teardown()
+            val terminated = runCatching {
+                executor.awaitTermination(STOP_AWAIT_TIMEOUT_S, TimeUnit.SECONDS)
+            }.getOrDefault(false)
+            if (!terminated) {
+                Log.w(TAG, "WHIP publish thread did not stop in time; forcing teardown")
+                teardown()
+            }
             Log.i(TAG, "WhipPublisher stopped")
         }
     }
@@ -127,6 +147,17 @@ class WhipPublisher(
             }
 
             if (!isRunning.get()) break
+
+            // Give up after too many consecutive failures instead of churning
+            // PeerConnection create/teardown forever (which crashes libjingle).
+            if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+                Log.e(TAG, "WHIP giving up after $consecutiveFailures consecutive failures")
+                mainHandler.post {
+                    listener?.onError("WHIP gave up after $consecutiveFailures failures")
+                }
+                isRunning.set(false)
+                break
+            }
 
             val delay = (RECONNECT_BASE_DELAY_MS * (1L shl minOf(consecutiveFailures - 1, 4)))
                 .coerceAtMost(RECONNECT_MAX_DELAY_MS)
@@ -373,14 +404,23 @@ class WhipPublisher(
         if (!isTearingDown.compareAndSet(false, true)) return
         try {
             deleteWhipResource()
+            // 1. Stop new frames flowing into the pipeline.
             runCatching { videoCapturer.stopCapture() }
+            // 2. Close + dispose the PeerConnection BEFORE the source/track it
+            //    references. The PC's sender holds the video track, which feeds
+            //    from the video source; disposing the source (or track) while the
+            //    PC is still alive leaves libjingle's signaling/worker threads
+            //    touching freed memory -> native SIGSEGV. close() first stops ICE
+            //    and signaling activity, then dispose tears down the native object.
+            runCatching { peerConnection?.close() }
+            runCatching { peerConnection?.dispose() }
+                .onFailure { Log.d(TAG, "PeerConnection dispose ignored: ${it.message}") }
+            peerConnection = null
+            // 3. Now it is safe to dispose the track and its source.
             runCatching { videoTrack?.dispose() }
             videoTrack = null
             runCatching { videoSource?.dispose() }
             videoSource = null
-            runCatching { peerConnection?.dispose() }
-                .onFailure { Log.d(TAG, "PeerConnection dispose ignored: ${it.message}") }
-            peerConnection = null
         } finally {
             isTearingDown.set(false)
         }

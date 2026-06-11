@@ -1,24 +1,16 @@
-"""
-WildBridge - DJI Interface Module
-
-A Python interface for controlling DJI drones through HTTP requests and TCP sockets,
-providing seamless integration for drone operations, telemetry retrieval, and video streaming.
-
-Authors: Edouard G.A. Rolland, Kilian Meier 
-Project: WildDrone
-Institution: University of Bristol, University of Southern Denmark (SDU)
-License: MIT
-
-For more information, visit: https://github.com/WildDrone/WildBridge
-"""
-
-import cv2
 import requests
 import ast
+import sys
+import time
+import cv2
 import json
 import socket
 import threading
-import time
+
+import math
+
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
 from datetime import datetime
 
 # Discovery Configuration
@@ -58,6 +50,24 @@ def discover_drone(timeout=5.0):
     
     return None
 
+# Aircraft state endpoint suffixes
+# GETTER
+EP_BASE = "/"
+EP_SPEED = "/aircraft/speed"
+EP_HEADING = "/aircraft/heading"
+EP_ATTITUDE = "/aircraft/attitude"
+EP_LOCATION = "/aircraft/location"
+EP_GIMBAL_ATTITUDE = "/aircraft/gimbalAttitude"
+EP_ALL_STATES = "/aircraft/allStates"
+EP_STICK_VALUES = "/aircraft/rcStickValues"
+EP_YAW_REACHED = "/status/yawReached"
+EP_ALTITUDE_REACHED = "/status/altitudeReached"
+EP_WP_REACHED = "/status/waypointReached"
+EP_HOME_LOCATION = "/home/location"
+EP_CAMERA_IS_RECORDING = "/status/camera/isRecording"
+EP_CAPTURE_THERMAL_IMAGE = "/send/captureThermalImage"
+
+# SETTER
 # HTTP POST Command Endpoints (port 8080)
 EP_STICK = "/send/stick"  # expects a formatted string: "<leftX>,<leftY>,<rightX>,<rightY>"
 EP_ZOOM = "/send/camera/zoom"
@@ -75,17 +85,25 @@ EP_GOTO_TRAJECTORY = "/send/navigateTrajectory"
 EP_GOTO_ALTITUDE = "/send/gotoAltitude"
 EP_CAMERA_START_RECORDING = "/send/camera/startRecording"
 EP_CAMERA_STOP_RECORDING = "/send/camera/stopRecording"
-EP_LRF_MEASURE = "/send/lrf/measure"
-EP_CAPTURE_THERMAL_IMAGE = "/send/captureThermalImage"
 EP_GOTO_TRAJECTORY_DJI_NATIVE = "/send/navigateTrajectoryDJINative"
 EP_ABORT_DJI_NATIVE_MISSION = "/send/abort/DJIMission"
 EP_SET_RTH_ALTITUDE = "/send/setRTHAltitude"
 EP_DEACTIVATE_MANUAL_OVERRIDE = "/send/deactivateManualOverride"
 EP_GET_MANUAL_OVERRIDE = "/get/isManualOverrideActive"
+EP_LRF_MEASURE = "/send/lrf/measure"
+EP_CAPTURE_THERMAL_IMAGE = "/send/captureThermalImage"
 
 # PID Tuning
 EP_TUNING = "/send/gotoWPwithPIDtuning"
+EP_PAYLOAD_DROP = "/send/drop"
 
+#PID Tuninng
+EP_TUNING = "/send/gotoWPwithPIDtuning"
+
+# Thermal Image handling
+SAVE_SUCCESS = "T_IMG_SAVE_SUCCESS"
+SAVE_FAILURE = "T_IMG_SAVE_FAILURE"
+CAP_FAILURE = "T_IMG_CAP_FAILURE"
 
 class DJIInterface:
     """
@@ -381,48 +399,6 @@ class DJIInterface:
         """Set camera zoom ratio."""
         return self.requestSend(EP_ZOOM, zoomRatio)
 
-    def requestLRFMeasure(self):
-        """Fire the H20T laser range finder once and return its reading."""
-        response = self.requestSend(EP_LRF_MEASURE, "")
-        if not response:
-            return {"distance": None, "target": None, "state": None}
-        try:
-            return json.loads(response)
-        except ValueError:
-            print(f"LRF: could not parse response: {response!r}")
-            return {"distance": None, "target": None, "state": None}
-
-    def requestCaptureThermalImage(self, save_path=None):
-        """Shoots a thermal photo, downloads the radiometric R-JPEG off the camera SD card,
-        and streams the JPEG bytes back in the HTTP response body (Content-Type image/jpeg).
-        """
-        if self.IP_RC == "":
-            print("No IP_RC provided, cannot capture thermal image")
-            return False
-
-        if save_path is None:
-            save_path = f"thermal_image_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-
-        try:
-            # Shutter + on-camera download takes several seconds; allow a generous timeout.
-            response = requests.post(
-                self.baseCommandUrl + EP_CAPTURE_THERMAL_IMAGE, data="", timeout=90)
-
-            content_type = response.headers.get("Content-Type", "")
-            if response.status_code == 200 and content_type.startswith("image/"):
-                with open(save_path, "wb") as f:
-                    f.write(response.content)
-                print(f"Thermal image saved to: {save_path}")
-                return True
-
-            print(f"Thermal capture failed: HTTP {response.status_code}, "
-                  f"Content-Type={content_type!r}, body={response.text[:200]!r}")
-            return False
-
-        except requests.exceptions.RequestException as e:
-            print(f"Error capturing thermal image: {e}")
-            return False
-
     def requestSendTakeOff(self):
         """Command the drone to take off."""
         return self.requestSend(EP_TAKEOFF, "")
@@ -462,6 +438,48 @@ class DJIInterface:
         """Navigate to a waypoint with custom PID tuning parameters."""
         return self.requestSend(EP_TUNING, f"{latitude},{longitude},{altitude},{yaw},{kp_pos},{ki_pos},{kd_pos},{kp_yaw},{ki_yaw},{kd_yaw}")
 
+    def requestCaptureThermalImage(self, save_path=None):
+        """Shoots a thermal photo, downloads the radiometric R-JPEG off the camera SD card,
+        and streams the JPEG bytes back in the HTTP response body (Content-Type image/jpeg).
+        """
+        if self.IP_RC == "":
+            print("No IP_RC provided, cannot capture thermal image")
+            return False
+
+        if save_path is None:
+            save_path = f"thermal_image_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+
+        try:
+            # Shutter + on-camera download takes several seconds; allow a generous timeout.
+            response = requests.post(
+                self.baseCommandUrl + EP_CAPTURE_THERMAL_IMAGE, data="", timeout=90)
+
+            content_type = response.headers.get("Content-Type", "")
+            if response.status_code == 200 and content_type.startswith("image/"):
+                with open(save_path, "wb") as f:
+                    f.write(response.content)
+                print(f"Thermal image saved to: {save_path}")
+                return True
+
+            print(f"Thermal capture failed: HTTP {response.status_code}, "
+                  f"Content-Type={content_type!r}, body={response.text[:200]!r}")
+            return False
+
+        except requests.exceptions.RequestException as e:
+            print(f"Error capturing thermal image: {e}")
+            return False
+        
+    def requestLRFMeasure(self):
+        """Fire the H20T laser range finder once and return its reading."""
+        response = self.requestSend(EP_LRF_MEASURE, "")
+        if not response:
+            return {"distance": None, "target": None, "state": None}
+        try:
+            return json.loads(response)
+        except ValueError:
+            print(f"LRF: could not parse response: {response!r}")
+            return {"distance": None, "target": None, "state": None}  
+        
     def requestSendNavigateTrajectory(self, waypoints, finalYaw):
         """
         Navigate through a series of waypoints.
@@ -549,8 +567,6 @@ class DJIInterface:
         and wants to allow autonomous commands to work again.
         """
         return self.requestSend(EP_DEACTIVATE_MANUAL_OVERRIDE, "")
-
-    # ==================== Deprecated methods (kept for backward compatibility) ====================
     
     def requestSticks(self):
         """Deprecated: RC stick values are now available via getTelemetry()."""
@@ -580,12 +596,229 @@ class DJIInterface:
     def requestCameraIsRecording(self):
         """Deprecated: Use isCameraRecording() instead."""
         return self.isCameraRecording()
+    
+    def requestDrop(self):
+        """Drop the payload."""
+        return self.requestSend(EP_PAYLOAD_DROP, "")
+
+class DJIInterfaceLite:
+    def __init__(self, IP_RC=""):
+        self.IP_RC = IP_RC
+        self.baseTelemUrl = f"http://{IP_RC}:8080"
+        self.videoSource = f"rtsp://aaa:aaa@{self.IP_RC}:8554/streaming/live/1"
+        self.imagePaths = []
+
+    def getVideoSource(self):
+        if self.IP_RC == "":
+            return ""
+        return self.videoSource
+
+    def requestGet(self, endPoint, verbose=False):
+        if self.IP_RC == "":
+            return ""
+        response = requests.get(self.baseTelemUrl + endPoint)
+        if verbose:
+            print("EP : " + endPoint + "\t" +
+                  str(response.content, encoding="utf-8"))
+        return response.content.decode('utf-8')
+
+    def requestSend(self, endPoint, data, verbose=False):
+        if self.IP_RC == "":
+            print(
+                f"No IP_RC provided, returning empty string for request at {endPoint}")
+            return ""
+        response = requests.post(self.baseTelemUrl + endPoint, str(data))
+        if verbose:
+            print("EP : " + endPoint + "\t" +
+                  str(response.content, encoding="utf-8"))
+        return response.content.decode('utf-8')
+
+    def requestAllStates(self, verbose=False):
+        response = self.requestGet(EP_ALL_STATES, verbose)
+        response = response.replace("null", "None")
+        try:
+            # TODO: probably very unsafe!!!
+            states = ast.literal_eval(response)
+            states["timestamp"] = datetime.now().strftime(
+                "%Y-%m-%d_%H-%M-%S.%f")
+
+            return states
+        except:
+            return {}
+
+    def requestSendStick(self, leftX=0, leftY=0, rightX=0, rightY=0):
+        # Saturate values such that they are in [-1;1]
+        s = 0.3
+        leftX = max(-s, min(s, leftX))
+        leftY = max(-s, min(s, leftY))
+        rightX = max(-s, min(s, rightX))
+        rightY = max(-s, min(s, rightY))
+        rep = self.requestSend(
+            EP_STICK, f"{leftX:.4f},{leftY:.4f},{rightX:.4f},{rightY:.4f}")
+        return rep
+
+    def requestSendGimbalPitch(self, pitch=0):
+        return self.requestSend(EP_GIMBAL_SET_PITCH, f"0,{pitch},0")
+
+    def requestSendGimbalYaw(self, yaw=0):
+        return self.requestSend(EP_GIMBAL_SET_YAW, f"0,0,{yaw}")
+
+    def requestSendZoomRatio(self, zoomRatio=1):
+        return self.requestSend(EP_ZOOM, zoomRatio)
+
+    def requestSendTakeOff(self):
+        return self.requestSend(EP_TAKEOFF, "")
+
+    def requestSendLand(self):
+        return self.requestSend(EP_LAND, "")
+
+    def requestSendRTH(self):
+        return self.requestSend(EP_RTH, "")
+
+    def requestSendGoToWP(self, latitude, longitude, altitude):
+        return self.requestSend(EP_GOTO_WP, f"{latitude},{longitude},{altitude}")
+
+    def requestSendGoToWPwithPID(self, latitude, longitude, altitude, yaw):
+        return self.requestSend(EP_GOTO_WP_PID, f"{latitude},{longitude},{altitude},{yaw}")
+    
+    def requestSendGoToWPwithPIDtuning(self, latitude, longitude, altitude, yaw, kp_pos, ki_pos, kd_pos, kp_yaw, ki_yaw, kd_yaw):
+        return self.requestSend(EP_TUNING, f"{latitude},{longitude},{altitude},{yaw},{kp_pos},{ki_pos},{kd_pos},{kp_yaw},{ki_yaw},{kd_yaw}")
+
+    def requestSendNavigateTrajectory(self, waypoints, finalYaw):
+        """
+        :param waypoints: A list of triples (latitude, longitude, altitude) for each waypoint.
+        :param finalYaw: The final yaw angle at the last waypoint.
+        :return: The response from the server.
+        """
+        self.requestSendEnableVirtualStick()
+        if not waypoints:
+            raise ValueError("No waypoints provided")
+
+        # Build the message
+        # All waypoints except the last: "lat,lon,alt"
+        # Last waypoint: "lat,lon,alt,yaw"
+        segments = []
+        for i, (lat, lon, alt) in enumerate(waypoints):
+            if i < len(waypoints) - 1:
+                # Intermediary waypoint: lat,lon,alt
+                segments.append(f"{lat},{lon},{alt}")
+            else:
+                # Last waypoint: lat,lon,alt,yaw
+                segments.append(f"{lat},{lon},{alt},{finalYaw}")
+
+        message = ";".join(segments)
+        return self.requestSend(EP_GOTO_TRAJECTORY, message)
+    
+    def requestDrop(self):
+        # TODO: Not safe now, need to get the payload information and check the payload availability maybe
+        return self.requestSend(EP_PAYLOAD_DROP, "")
+    
+    def requestSendNavigateTrajectoryDJINative(self, waypoints):
+        """
+        Send waypoints to be executed using DJI's native waypoint mission system.
+        :param waypoints: A list of triples (latitude, longitude, altitude) for each waypoint.
+        :return: The response from the server.
+        """
+        if not waypoints:
+            raise ValueError("No waypoints provided")
+
+        # Build the message format: "lat,lon,alt; lat,lon,alt; ..."
+        segments = []
+        for lat, lon, alt in waypoints:
+            segments.append(f"{lat},{lon},{alt}")
+
+        message = ";".join(segments)
+        return self.requestSend(EP_GOTO_TRAJECTORY_DJI_NATIVE, message)
+
+    def requestCaptureThermalImage(self, save_path=None):
+        """
+        Requests the drone to capture a thermal image and optionally saves it.
+        Args:
+            save_path (str, optional): Path where to save the image. If None, generates a timestamped filename.
+        Returns:
+            str: Path to the saved image if successful, None otherwise.
+        """
+        if self.IP_RC == "":
+            print("No IP_RC provided, cannot capture thermal image")
+            return None
+            
+        # Generate default save path if none provided
+        if save_path is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            save_path = f"thermal_image_{timestamp}.jpg"
+            
+        try:
+            response = requests.post(self.baseTelemUrl + EP_CAPTURE_THERMAL_IMAGE,
+                                  data="",
+                                  timeout=20)
+
+            if response.headers.get('Content-Type', '').startswith('image/'):
+                with open(save_path, 'wb') as f:
+                    f.write(response.content)
+                print(f"Thermal image saved to: {save_path}")
+                self.imagePaths.append(save_path)
+                return SAVE_SUCCESS
+            else:
+                print(f"Error: Received non-image response: {response.text}")
+                return SAVE_FAILURE
+
+        except Exception as e:
+            print(f"Error capturing thermal image: {str(e)}")
+            return CAP_FAILURE
+    
+    def requestAbortDJINativeMission(self):
+        return self.requestSend(EP_ABORT_DJI_NATIVE_MISSION, "")
+
+    def requestSticks(self):
+        return self.requestGet(EP_STICK_VALUES, True)
+
+    def requestAbortMission(self):
+        return self.requestSend(EP_ABORT_MISSION, "")
+
+    def requestWaypointStatus(self):
+        return self.requestGet(EP_WP_REACHED)
+
+    def requestIntermediaryWaypointStatus(self):
+        return self.requestGet(EP_INTERMEDIARY_WP_REACHED)
+
+    def requestSendEnableVirtualStick(self):
+        return self.requestSend(EP_ENABLE_VIRTUAL_STICK, "")
+
+    def requestYawStatus(self):
+        return self.requestGet(EP_YAW_REACHED)
+
+    def requestSendGotoYaw(self, yaw):
+        return self.requestSend(EP_GOTO_YAW, f"{yaw}")
+
+    def requestSendGotoAltitude(self, altitude):
+        return self.requestSend(EP_GOTO_ALTITUDE, f"{altitude}")
+
+    def requestAltitudeStatus(self):
+        return self.requestGet(EP_ALTITUDE_REACHED)
+
+    def requestHomePosition(self):
+        response = self.requestGet(EP_HOME_LOCATION, False)
+        try:
+            # TODO: probably very unsafe!!!
+            home = ast.literal_eval(response)
+            return home
+        except:
+            return {}
+
+    def requestCameraStartRecording(self):
+        return self.requestSend(EP_CAMERA_START_RECORDING, "")
+
+    def requestCameraStopRecording(self):
+        return self.requestSend(EP_CAMERA_STOP_RECORDING, "")
+
+    def requestCameraIsRecording(self):
+        return self.requestGet(EP_CAMERA_IS_RECORDING) == "true"
 
 if __name__ == '__main__':
     import time
     import sys
     
-    IP_RC = "10.102.252.30"  # REPLACE WITH YOUR RC IP
+    IP_RC = "172.20.10.12"  # REPLACE WITH YOUR RC IP
     
     if len(sys.argv) > 1:
         IP_RC = sys.argv[1]
@@ -649,3 +882,4 @@ if __name__ == '__main__':
         print("\n\nStopping telemetry stream...")
         dji.stopTelemetryStream()
         print("Done.")
+

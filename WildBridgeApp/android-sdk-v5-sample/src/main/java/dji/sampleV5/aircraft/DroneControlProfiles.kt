@@ -9,6 +9,7 @@ import dji.v5.manager.aircraft.payload.PayloadIndexType
 enum class DroneControlProfile(
     val displayName: String,
     val maxHorizontalSpeedMps: Double,
+    val maxHorizontalAccelMps2: Double,
     val maxGotoWpSpeedMps: Double,
     val distanceKp: Double,
     val distanceKi: Double,
@@ -28,26 +29,28 @@ enum class DroneControlProfile(
 ) {
     MAVIC_3_ENTERPRISE(
         displayName = "Mavic 3 Enterprise",
-        maxHorizontalSpeedMps = 15.0,
-        maxGotoWpSpeedMps = 5.0,
+        maxHorizontalSpeedMps = 25.0,
+        maxHorizontalAccelMps2 = 0.5,
+        maxGotoWpSpeedMps = 25.0,
         distanceKp = 0.65,
         distanceKi = 0.0001,
         distanceKd = 0.001,
         yawKp = 3.0,
         maxYawRateDegS = 30.0,
-        defaultCruiseSpeedMps = 5.0,
-        payloadIndexType = PayloadIndexType.PORT_3
+        defaultCruiseSpeedMps = 15.0,
+        payloadIndexType = null
     ),
     MATRICE_300_RTK(
         displayName = "Matrice 300 RTK",
-        maxHorizontalSpeedMps = 3.0,
-        maxGotoWpSpeedMps = 3.0,
-        distanceKp = 0.34,
+        maxHorizontalSpeedMps = 25.0,
+        maxHorizontalAccelMps2 = 0.5,
+        maxGotoWpSpeedMps = 25.0,
+        distanceKp = 0.35,
         distanceKi = 0.0001,
         distanceKd = 0.001,
         yawKp = 3.0,
         maxYawRateDegS = 30.0,
-        defaultCruiseSpeedMps = 3.0,
+        defaultCruiseSpeedMps = 25.0,
         // SkyPort release payload (TH4) sits on the RIGHT gimbal position; its drop is the
         // config-interface Unlock SWITCH (3) + All_Down BUTTON (5).
         payloadIndexType = PayloadIndexType.RIGHT,
@@ -56,9 +59,10 @@ enum class DroneControlProfile(
     ),
     MATRICE_350_RTK(
         displayName = "Matrice 350 RTK",
-        maxHorizontalSpeedMps = 3.0,
-        maxGotoWpSpeedMps = 3.0,
-        distanceKp = 0.34,
+        maxHorizontalSpeedMps = 25.0,
+        maxHorizontalAccelMps2 = 0.5,
+        maxGotoWpSpeedMps = 25.0,
+        distanceKp = 0.35,
         distanceKi = 0.0001,
         distanceKd = 0.001,
         yawKp = 3.0,
@@ -71,14 +75,15 @@ enum class DroneControlProfile(
     ),
     MATRICE_400(
         displayName = "Matrice 400",
-        maxHorizontalSpeedMps = 3.0,
-        maxGotoWpSpeedMps = 3.0,
-        distanceKp = 0.34,
+        maxHorizontalSpeedMps = 25.0,
+        maxHorizontalAccelMps2 = 0.5,
+        maxGotoWpSpeedMps = 25.0,
+        distanceKp = 0.35,
         distanceKi = 0.0001,
         distanceKd = 0.001,
         yawKp = 3.0,
         maxYawRateDegS = 30.0,
-        defaultCruiseSpeedMps = 3.0,
+        defaultCruiseSpeedMps = 25.0,
         // Same TH4 SkyPort payload as the M300 (on PORT_3 here). Release ALL hooks via the
         // config-interface Unlock SWITCH (3) + All_Down BUTTON (5); main Down (1) drops only
         // one and main All_Down (2) does nothing on this payload.
@@ -89,6 +94,7 @@ enum class DroneControlProfile(
     MINI_4_PRO(
         displayName = "DJI Mini 4 Pro",
         maxHorizontalSpeedMps = 15.0,
+        maxHorizontalAccelMps2 = 0.5,
         maxGotoWpSpeedMps = 5.0,
         distanceKp = 0.65,
         distanceKi = 0.0001,
