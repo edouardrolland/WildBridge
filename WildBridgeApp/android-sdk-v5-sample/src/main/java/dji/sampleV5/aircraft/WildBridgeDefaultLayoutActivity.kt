@@ -406,8 +406,11 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
         // Setup drone status indicator
         setupDroneStatusView()
 
-        // Initialize LocationManager
-        locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        // Initialize LocationManager from the APPLICATION context. The framework can keep the
+        // LocationManager's transport in a native global after removeUpdates(); if the manager
+        // were bound to the activity context, its mContext would then pin the destroyed activity
+        // (LeakCanary). The application context is process-scoped, so it cannot leak the activity.
+        locationManager = applicationContext.getSystemService(Context.LOCATION_SERVICE) as LocationManager
         startLocationUpdates()
 
         // Initialize Phone Sensors & Managers
