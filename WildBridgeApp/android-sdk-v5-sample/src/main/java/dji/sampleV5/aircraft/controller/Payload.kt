@@ -25,12 +25,6 @@ import dji.v5.manager.datacenter.media.MediaFile
 import dji.v5.manager.datacenter.media.MediaFileDownloadListener
 import dji.sdk.keyvalue.value.payload.WidgetType
 import dji.sdk.keyvalue.value.payload.WidgetValue
-import dji.v5.utils.common.ContextUtil
-import dji.v5.utils.common.DiskUtil
-import java.io.BufferedOutputStream
-import java.io.File
-import java.io.FileOutputStream
-import java.io.IOException
 import java.io.OutputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -40,7 +34,7 @@ import java.util.concurrent.TimeUnit
  *
  * Singleton so the HTTP endpoints in WildBridgeDefaultLayoutActivity can fire payload
  * actions without holding payload-specific state in the activity. The blocking calls
- * (takeFreshLrfReading, takeThermalImage, sendMediaFile) are invoked from the HTTP
+ * (takeFreshLrfReading, takeThermalAndVisual, sendThermalAndVisual) are invoked from the HTTP
  * server's worker threads, and are expected to run one at a time — the command server
  * issues capture requests serially.
  */
@@ -138,10 +132,68 @@ object Payload {
         newMediaListenerRegistered = true
     }
 
-    // Capture a thermal photo on the H20T and return the resulting on-camera MediaFile.
-    // Blocking, call from a worker thread. mediaVM must be init'd with SD card storage and the
-    // LEFT_OR_MAIN component index (done in the host activity's onCreate).
-    fun takeThermalImage(mediaVM: MediaVM): MediaFile? {
+    // A single H20T shutter writes up to three co-aligned files to the SD card with the same
+    // timestamp and scene: a radiometric thermal R-JPEG, the wide visual (RGB) photo, and the
+    // zoom-lens photo. These are the hardware-synchronized counterparts to the thermal frame —
+    // strictly better aligned than tapping the (separately-pipelined) WHIP live stream. Each is
+    // null when the H20T is not configured to store that lens.
+    data class ThermalCapture(val thermal: MediaFile?, val visual: MediaFile?, val zoom: MediaFile?)
+
+    // H20T per-lens filename suffixes (before the extension): _T = thermal R-JPEG,
+    // _W = wide / _V = visible RGB, _Z = zoom.
+    private fun baseNameNoExt(name: String?): String =
+        (name ?: "").substringBeforeLast('.').uppercase()
+
+    private fun isThermalName(name: String?): Boolean = baseNameNoExt(name).endsWith("_T")
+
+    private fun isWideName(name: String?): Boolean =
+        baseNameNoExt(name).let { it.endsWith("_W") || it.endsWith("_V") }
+
+    private fun isZoomName(name: String?): Boolean = baseNameNoExt(name).endsWith("_Z")
+
+    // Fire one shutter and return the thermal, wide-visual (RGB) and zoom MediaFiles from it.
+    // Blocking, call from a worker thread.
+    fun takeThermalAndVisual(mediaVM: MediaVM): ThermalCapture {
+        val newFiles = captureNewMediaFiles(mediaVM)
+        if (newFiles.isEmpty()) return ThermalCapture(null, null, null)
+
+        // The H20T may surface the lens images of one shot either as separate sibling entries
+        // or grouped under a parent MediaFile (subMediaFile). Flatten both so classification
+        // sees every variant.
+        val variants = LinkedHashMap<String, MediaFile>()
+        fun add(file: MediaFile?) {
+            if (file?.fileName == null) return
+            variants.putIfAbsent(file.fileName, file)
+            file.subMediaFile?.forEach { sub -> sub?.fileName?.let { variants.putIfAbsent(it, sub) } }
+        }
+        newFiles.forEach { add(it) }
+        val all = variants.values.toList()
+        Log.i(TAG, "Lens files this shutter: ${all.map { "${it.fileName}#${it.fileIndex}(${it.fileSize}B)" }}")
+
+        // Thermal: the _T file by name; failing that the SMALLEST file (the radiometric R-JPEG is
+        // far smaller than the full-res wide/zoom visuals), which is a much safer fallback than
+        // blindly trusting the first-reported file.
+        val thermal = all.firstOrNull { isThermalName(it.fileName) }
+            ?: all.minByOrNull { it.fileSize }
+            ?: newFiles.first()
+        // Wide visual (RGB) and zoom siblings, distinguished by lens suffix.
+        val visual = all.firstOrNull { isWideName(it.fileName) && it.fileName != thermal.fileName }
+        val zoom = all.firstOrNull { isZoomName(it.fileName) && it.fileName != thermal.fileName }
+
+        if (visual == null && zoom == null) {
+            Log.w(TAG, "No wide/zoom siblings found — H20T may be set to store infrared only")
+        } else {
+            Log.i(TAG, "Paired thermal=${thermal.fileName} (${thermal.fileSize}B) " +
+                "visual=${visual?.fileName} (${visual?.fileSize}B) zoom=${zoom?.fileName} (${zoom?.fileSize}B)")
+        }
+        return ThermalCapture(thermal, visual, zoom)
+    }
+
+    // Trip one shutter on the H20T and return ALL media files it produced (thermal R-JPEG plus,
+    // when visible storage is enabled, the wide/zoom visual photo). Blocking, call from a worker
+    // thread. mediaVM must be init'd with SD card storage and the LEFT_OR_MAIN component index
+    // (done in the host activity's onCreate).
+    private fun captureNewMediaFiles(mediaVM: MediaVM): List<MediaFile> {
         try {
             setupNewMediaListener()
 
@@ -167,9 +219,9 @@ object Payload {
             }
             if (!photoLatch.await(8, TimeUnit.SECONDS)) {
                 Log.e(TAG, "Timeout waiting for shutter")
-                return null
+                return emptyList()
             }
-            if (photoError != null) return null
+            if (photoError != null) return emptyList()
 
             // Wait for a new index to appear from either the listener push or the key cache
             var newIndex: Int? = null
@@ -189,26 +241,37 @@ object Payload {
             }
             if (newIndex == null) {
                 Log.e(TAG, "No new media index after shutter (baseline=$baselineIndex)")
-                return null
+                return emptyList()
             }
             Log.i(TAG, "New photo index=$newIndex (baseline=$baselineIndex)")
 
-            // Pull that single entry and poll the file list until it appears.
-            mainHandler.post { mediaVM.pullMediaFileListFromCamera(newIndex, 1) }
+            // Pull a WINDOW around the new index, not a single entry: one H20T shutter writes
+            // several lens files (thermal + wide/zoom visual) at adjacent indices, and the
+            // "newly generated" key reports only one of them. A ±window pull surfaces them all.
+            val window = 6
+            val start = (newIndex - window).coerceAtLeast(0)
+            mainHandler.post { mediaVM.pullMediaFileListFromCamera(start, window * 2 + 1) }
+
             val listDeadline = System.currentTimeMillis() + 10000L
             while (System.currentTimeMillis() < listDeadline) {
-                val file = mediaVM.mediaFileListData.value?.data?.firstOrNull { it.fileIndex == newIndex }
-                if (file != null) {
-                    Log.i(TAG, "Resolved ${file.fileName} at index ${file.fileIndex}")
-                    return file
+                val data = mediaVM.mediaFileListData.value?.data
+                if (data?.any { it.fileIndex == newIndex } == true) {
+                    // Files from THIS shutter are exactly those newer than the pre-shutter baseline
+                    // (captures are serial). With no baseline (first shot), fall back to the window.
+                    val newFiles = data.filter {
+                        if (baselineIndex != null) it.fileIndex > baselineIndex
+                        else it.fileIndex in (newIndex - window)..(newIndex + window)
+                    }
+                    Log.i(TAG, "Resolved ${newFiles.size} new file(s): ${newFiles.map { "${it.fileName}#${it.fileIndex}" }}")
+                    return newFiles
                 }
                 Thread.sleep(100)
             }
             Log.e(TAG, "File list never surfaced index $newIndex")
-            return null
+            return emptyList()
         } catch (e: Exception) {
             Log.e(TAG, "Error taking thermal image: ${e.message}", e)
-            return null
+            return emptyList()
         } finally {
             // takePhoto switches the camera to PHOTO_NORMAL; restore video mode so the
             // live feed isn't left in photo mode after a capture.
@@ -225,104 +288,117 @@ object Payload {
         }
     }
 
-    // Download photoFile from the camera to local cache, then stream the raw JPEG bytes back
-    // over outputStream as a jpeg HTTP response. Blocking.
-    fun sendMediaFile(photoFile: MediaFile, outputStream: OutputStream) {
+    // A downloaded image held in memory, ready to be framed into the multipart response.
+    private class ImagePart(val name: String, val fileName: String, val bytes: ByteArray)
+
+    // Download a MediaFile from the camera straight into memory (no disk round-trip) and return
+    // its bytes, or null on failure. Blocking. The DJI-link download is the bottleneck; skipping
+    // the write-to-flash-then-read-back saves tens of MB of needless I/O per capture.
+    private fun downloadToBytes(photoFile: MediaFile): ByteArray? {
+        Log.i(TAG, "Downloading ${photoFile.fileName} (${photoFile.fileSize} bytes) to memory")
+        // Pre-size the buffer to the known file size to avoid repeated array growth/copies.
+        val initialCapacity = photoFile.fileSize.takeIf { it in 1..Int.MAX_VALUE.toLong() }?.toInt() ?: (1 shl 20)
+        val buffer = java.io.ByteArrayOutputStream(initialCapacity)
+
+        val downloadLatch = CountDownLatch(1)
+        var downloadError: String? = null
+
+        photoFile.pullOriginalMediaFileFromCamera(0L, object : MediaFileDownloadListener {
+            override fun onStart() { /* no-op */ }
+            override fun onProgress(total: Long, current: Long) { /* no-op */ }
+            override fun onRealtimeDataUpdate(data: ByteArray, position: Long) {
+                // Callbacks arrive in order from offset 0, so a plain append reconstructs the file.
+                buffer.write(data, 0, data.size)
+            }
+            override fun onFinish() {
+                downloadLatch.countDown()
+            }
+            override fun onFailure(error: IDJIError?) {
+                downloadError = error?.description() ?: "Unknown download error"
+                Log.e(TAG, "Download failed for ${photoFile.fileName}: $downloadError")
+                downloadLatch.countDown()
+            }
+        })
+
+        if (!downloadLatch.await(120, TimeUnit.SECONDS)) {
+            Log.e(TAG, "Timeout downloading ${photoFile.fileName}")
+            return null
+        }
+        if (downloadError != null) return null
+        val bytes = buffer.toByteArray()
+        if (bytes.isEmpty()) {
+            Log.e(TAG, "Downloaded ${photoFile.fileName} is empty")
+            return null
+        }
+        Log.i(TAG, "Downloaded ${photoFile.fileName} (${bytes.size} bytes) to memory")
+        return bytes
+    }
+
+    // Download the thermal (and, when present, the synchronized wide-visual and zoom) photos and
+    // write them back as a single multipart/mixed HTTP response. Each part is an image/jpeg with a
+    // Content-Disposition name ("thermal" / "visual" / "zoom") and the on-camera filename, so the
+    // ground station can tell them apart and trust they came from the same shutter. Falls back to
+    // an error response if the thermal photo can't be downloaded. Blocking.
+    fun sendThermalAndVisual(capture: ThermalCapture, outputStream: OutputStream) {
         try {
-            Log.i(TAG, "Downloading media file: ${photoFile.fileName}")
-
-            val dirs = File(DiskUtil.getExternalCacheDirPath(ContextUtil.getContext(), "/mediafile"))
-            if (!dirs.exists()) dirs.mkdirs()
-
-            val filepath = DiskUtil.getExternalCacheDirPath(ContextUtil.getContext(), "/mediafile/" + photoFile.fileName)
-            val file = File(filepath)
-            if (file.exists()) file.delete()
-
-            val downloadLatch = CountDownLatch(1)
-            var downloadSuccess = false
-            var downloadError: String? = null
-
-            val outputFileStream = FileOutputStream(file, false)
-            val bos = BufferedOutputStream(outputFileStream)
-
-            photoFile.pullOriginalMediaFileFromCamera(0L, object : MediaFileDownloadListener {
-                override fun onStart() {
-                    Log.i(TAG, "Download started: ${photoFile.fileName}")
-                }
-                override fun onProgress(total: Long, current: Long) { /* no-op */ }
-                override fun onRealtimeDataUpdate(data: ByteArray, position: Long) {
-                    try {
-                        bos.write(data)
-                        bos.flush()
-                    } catch (e: IOException) {
-                        Log.e(TAG, "Error writing download data: ${e.message}")
-                        downloadError = e.message
-                    }
-                }
-                override fun onFinish() {
-                    try {
-                        bos.close()
-                        outputFileStream.close()
-                        downloadSuccess = true
-                    } catch (error: IOException) {
-                        downloadError = error.message
-                    } finally {
-                        downloadLatch.countDown()
-                    }
-                }
-                override fun onFailure(error: IDJIError?) {
-                    try {
-                        bos.close()
-                        outputFileStream.close()
-                    } catch (e: IOException) { /* ignore close errors */ }
-                    downloadError = error?.description() ?: "Unknown download error"
-                    Log.e(TAG, "Download failed: $downloadError")
-                    downloadLatch.countDown()
-                }
-            })
-
-            if (!downloadLatch.await(60, TimeUnit.SECONDS)) {
-                Log.e(TAG, "Timeout waiting for file download")
-                sendErrorResponse(outputStream, "Download timeout")
+            val thermalBytes = capture.thermal?.let { downloadToBytes(it) }
+            if (thermalBytes == null) {
+                sendErrorResponse(outputStream, "Failed to download thermal image")
                 return
             }
-            if (!downloadSuccess || downloadError != null) {
-                sendErrorResponse(outputStream, "Download failed: $downloadError")
-                return
+            val parts = mutableListOf(
+                ImagePart("thermal", capture.thermal.fileName ?: "thermal.jpg", thermalBytes)
+            )
+            capture.visual?.let { mf ->
+                val b = downloadToBytes(mf)
+                if (b != null) parts.add(ImagePart("visual", mf.fileName ?: "visual.jpg", b))
+                else Log.w(TAG, "Visual sibling ${mf.fileName} failed to download; skipping it")
+            }
+            capture.zoom?.let { mf ->
+                val b = downloadToBytes(mf)
+                if (b != null) parts.add(ImagePart("zoom", mf.fileName ?: "zoom.jpg", b))
+                else Log.w(TAG, "Zoom sibling ${mf.fileName} failed to download; skipping it")
             }
 
-            val actualFileSize = file.length()
-            if (!file.exists() || actualFileSize == 0L) {
-                sendErrorResponse(outputStream, "Downloaded file missing or empty")
-                return
+            val boundary = "WildBridgeBoundary${System.currentTimeMillis()}"
+            // Pre-render each part's header so we can compute an exact Content-Length and then
+            // stream parts straight to the socket — no second 20 MB copy of the whole body.
+            val partHeaders = parts.map {
+                ("--$boundary\r\n" +
+                    "Content-Type: image/jpeg\r\n" +
+                    "Content-Disposition: attachment; name=\"${it.name}\"; filename=\"${it.fileName}\"\r\n" +
+                    "Content-Length: ${it.bytes.size}\r\n\r\n").toByteArray()
             }
-            Log.i(TAG, "Downloaded ${photoFile.fileName} ($actualFileSize bytes)")
+            val closing = "--$boundary--\r\n".toByteArray()
+            val crlf = "\r\n".toByteArray()
+            val contentLength = parts.indices.sumOf { partHeaders[it].size + parts[it].bytes.size + crlf.size } + closing.size
 
             val headers = StringBuilder().apply {
                 append("HTTP/1.1 200 OK\r\n")
-                append("Content-Type: image/jpeg\r\n")
-                append("Content-Length: $actualFileSize\r\n")
+                append("Content-Type: multipart/mixed; boundary=$boundary\r\n")
+                append("Content-Length: $contentLength\r\n")
                 append("Access-Control-Allow-Origin: *\r\n")
                 append("Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n")
                 append("Access-Control-Allow-Headers: Content-Type\r\n")
                 append("\r\n")
             }
             outputStream.write(headers.toString().toByteArray())
-
-            file.inputStream().use { input ->
-                val buffer = ByteArray(8192)
-                var bytesRead: Int
-                while (input.read(buffer).also { bytesRead = it } != -1) {
-                    outputStream.write(buffer, 0, bytesRead)
-                }
-                outputStream.flush()
+            for (i in parts.indices) {
+                outputStream.write(partHeaders[i])
+                outputStream.write(parts[i].bytes)
+                outputStream.write(crlf)
             }
-            Log.i(TAG, "Thermal image sent (${photoFile.fileName})")
-            mainHandler.post { ToastUtils.showToast("Thermal image sent") }
+            outputStream.write(closing)
+            outputStream.flush()
+
+            Log.i(TAG, "Sent ${parts.size} image part(s): ${parts.map { it.name }} ($contentLength bytes)")
+            mainHandler.post {
+                ToastUtils.showToast("Sent ${parts.size} image(s): ${parts.joinToString(", ") { it.name }}")
+            }
         } catch (e: Exception) {
-            Log.e(TAG, "Error sending file: ${e.message}", e)
+            Log.e(TAG, "Error sending images: ${e.message}", e)
             try {
-                sendErrorResponse(outputStream, "Error sending file: ${e.message}")
+                sendErrorResponse(outputStream, "Error sending images: ${e.message}")
             } catch (responseError: Exception) {
                 Log.e(TAG, "Failed to send error response: ${responseError.message}")
             }

@@ -2048,8 +2048,9 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
                     postData = String(buffer)
                 }
 
-                // Thermal capture returns a binary JPEG, so it writes its own HTTP response
-                // directly to the socket and bypasses the text-response path below.
+                // Thermal capture returns binary image data (a multipart/mixed body carrying the
+                // thermal R-JPEG plus its synchronized RGB sibling), so it writes its own HTTP
+                // response directly to the socket and bypasses the text-response path below.
                 if (method == "POST" && uri == "/send/captureThermalImage") {
                     WildBridgeFlightLogger.logCommand(uri, postData)
                     val outputStream = clientSocket.getOutputStream()
@@ -2058,9 +2059,9 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
                         clientSocket.close()
                         return
                     }
-                    val photoFile = Payload.takeThermalImage(mediaVM)
-                    if (photoFile != null) {
-                        Payload.sendMediaFile(photoFile, outputStream)
+                    val capture = Payload.takeThermalAndVisual(mediaVM)
+                    if (capture.thermal != null) {
+                        Payload.sendThermalAndVisual(capture, outputStream)
                     } else {
                         Payload.sendErrorResponse(outputStream, "Failed to capture thermal image")
                     }

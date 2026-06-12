@@ -39,6 +39,7 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+GroundStation/Python/capture_*/
 
 # Misc
 *.pt
