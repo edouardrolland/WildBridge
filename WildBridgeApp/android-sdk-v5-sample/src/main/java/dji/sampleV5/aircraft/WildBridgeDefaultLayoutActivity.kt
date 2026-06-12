@@ -2048,22 +2048,38 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
                     postData = String(buffer)
                 }
 
-                // Thermal capture returns binary image data (a multipart/mixed body carrying the
-                // thermal R-JPEG plus its synchronized RGB sibling), so it writes its own HTTP
-                // response directly to the socket and bypasses the text-response path below.
+                // Thermal capture is two-step. Capture only trips one shutter and returns a JSON
+                // descriptor (captureId + which lenses were stored); the lens files are held on
+                // the drone and downloaded individually via /send/downloadCapturedImage.
                 if (method == "POST" && uri == "/send/captureThermalImage") {
                     WildBridgeFlightLogger.logCommand(uri, postData)
-                    val outputStream = clientSocket.getOutputStream()
-                    if (!ControlAuthority.authorizeControlCommand(source)) {
-                        Payload.sendErrorResponse(outputStream, "REJECTED: Safety Computer is in control.")
-                        clientSocket.close()
-                        return
-                    }
-                    val capture = Payload.takeThermalAndVisual(mediaVM)
-                    if (capture.thermal != null) {
-                        Payload.sendThermalAndVisual(capture, outputStream)
+                    val body: String = if (!ControlAuthority.authorizeControlCommand(source)) {
+                        "{\"error\":\"REJECTED: Safety Computer is in control.\"}"
                     } else {
-                        Payload.sendErrorResponse(outputStream, "Failed to capture thermal image")
+                        Payload.captureThermal(mediaVM) ?: "{\"error\":\"Failed to capture thermal image\"}"
+                    }
+                    val bodyBytes = body.toByteArray()
+                    writer.println("HTTP/1.1 200 OK")
+                    writer.println("Content-Type: application/json")
+                    writer.println("Content-Length: ${bodyBytes.size}")
+                    writer.println("Access-Control-Allow-Origin: *")
+                    writer.println()
+                    writer.print(body)
+                    writer.flush()
+                    clientSocket.close()
+                    return
+                }
+
+                // Download one lens from a prior capture: body is "captureId,lens". Returns binary
+                // image/jpeg written straight to the socket, bypassing the text-response path below.
+                if (method == "POST" && uri == "/send/downloadCapturedImage") {
+                    WildBridgeFlightLogger.logCommand(uri, postData)
+                    val outputStream = clientSocket.getOutputStream()
+                    val args = postData.split(",")
+                    if (args.size < 2) {
+                        Payload.sendErrorResponse(outputStream, "Expected body 'captureId,lens'")
+                    } else {
+                        Payload.sendCapturedImage(args[0].trim(), args[1].trim(), outputStream)
                     }
                     clientSocket.close()
                     return

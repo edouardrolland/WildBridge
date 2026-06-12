@@ -183,8 +183,15 @@ class MediaVM : DJIViewModel() {
             CallbackUtils.onFailure(callback, DJICommonError.FACTORY.build(DJICommonError.DISCONNECTED))
             return
         }
-        RxUtil.setValue(createKey<CameraMode>(CameraKey.KeyCameraMode, index), CameraMode.PHOTO_NORMAL)
-            .andThen(RxUtil.performActionWithOutResult(createKey(CameraKey.KeyStartShootPhoto, index)))
+        val modeKey = createKey<CameraMode>(CameraKey.KeyCameraMode, index)
+        val shoot = RxUtil.performActionWithOutResult(createKey(CameraKey.KeyStartShootPhoto, index))
+        // Switching VIDEO->PHOTO on the camera costs a couple of seconds. We no longer restore
+        // video after a capture, so the camera is usually already in PHOTO_NORMAL from a prior
+        // shot — skip the redundant mode set in that case and shoot straight away.
+        val capture =
+            if (KeyManager.getInstance().getValue(modeKey) == CameraMode.PHOTO_NORMAL) shoot
+            else RxUtil.setValue(modeKey, CameraMode.PHOTO_NORMAL).andThen(shoot)
+        capture
             .subscribe({ CallbackUtils.onSuccess(callback) }
             ) { throwable: Throwable ->
                 CallbackUtils.onFailure(

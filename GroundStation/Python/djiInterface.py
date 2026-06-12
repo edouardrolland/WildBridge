@@ -1,5 +1,6 @@
 import requests
 import ast
+import os
 import re
 import sys
 import time
@@ -92,7 +93,32 @@ EP_SET_RTH_ALTITUDE = "/send/setRTHAltitude"
 EP_DEACTIVATE_MANUAL_OVERRIDE = "/send/deactivateManualOverride"
 EP_GET_MANUAL_OVERRIDE = "/get/isManualOverrideActive"
 EP_LRF_MEASURE = "/send/lrf/measure"
-EP_CAPTURE_THERMAL_IMAGE = "/send/captureThermalImage"
+EP_DOWNLOAD_CAPTURED_IMAGE = "/send/downloadCapturedImage"
+
+# The bridge identifies the three co-aligned lenses of one H20T shutter by these
+# exact names (no aliases). One shutter exposes all of them at once; the lens(es)
+# you pass select which are downloaded.
+LENS_KEYS = ("thermal", "wide", "zoom")
+
+
+def canonical_lenses(lenses):
+    """Normalize a lens selection into an ordered, de-duplicated list of lens names.
+
+    Accepts a single name ("wide"), a list/tuple, or a comma/space-separated string
+    ("thermal,zoom"). The only valid names are the members of LENS_KEYS — no aliases;
+    matching is case-insensitive. Output order follows LENS_KEYS. Raises ValueError on
+    an unknown lens name.
+    """
+    if isinstance(lenses, str):
+        lenses = [part for part in lenses.replace(",", " ").split() if part]
+    requested = set()
+    for name in lenses:
+        key = str(name).strip().lower()
+        if key not in LENS_KEYS:
+            raise ValueError(f"unknown lens {name!r}; valid: {', '.join(LENS_KEYS)}")
+        requested.add(key)
+    return [k for k in LENS_KEYS if k in requested]
+
 
 # PID Tuning
 EP_TUNING = "/send/gotoWPwithPIDtuning"
@@ -105,40 +131,6 @@ EP_TUNING = "/send/gotoWPwithPIDtuning"
 SAVE_SUCCESS = "T_IMG_SAVE_SUCCESS"
 SAVE_FAILURE = "T_IMG_SAVE_FAILURE"
 CAP_FAILURE = "T_IMG_CAP_FAILURE"
-
-
-def _parse_multipart(content, content_type):
-    """Split a multipart/mixed body into {part_name: (filename, raw_bytes)}.
-
-    The thermal-capture endpoint returns image parts whose Content-Disposition carries
-    name="thermal" / name="visual" plus the original on-camera filename. Dependency-free so
-    the ground station needs no extra packages beyond requests.
-    """
-    match = re.search(r"boundary=([^\s;]+)", content_type)
-    if not match:
-        return {}
-    boundary = match.group(1).strip('"')
-    delimiter = b"--" + boundary.encode()
-
-    result = {}
-    for chunk in content.split(delimiter):
-        # Skip the preamble and the closing "--" marker.
-        if not chunk or chunk in (b"--\r\n", b"--", b"\r\n"):
-            continue
-        header_blob, sep, body = chunk.partition(b"\r\n\r\n")
-        if not sep:
-            continue
-        # Body is followed by a CRLF that belongs to the multipart framing, not the payload.
-        if body.endswith(b"\r\n"):
-            body = body[:-2]
-        headers = header_blob.decode("latin-1", "replace")
-        name_match = re.search(r'name="([^"]+)"', headers)
-        if name_match:
-            filename_match = re.search(r'filename="([^"]*)"', headers)
-            filename = filename_match.group(1) if filename_match else ""
-            result[name_match.group(1)] = (filename, body)
-    return result
-
 
 class DJIInterface:
     """
@@ -433,11 +425,6 @@ class DJIInterface:
 
     # ==================== Commands (HTTP POST on port 8080) ====================
 
-    def _authHeaders(self):
-        """Extra HTTP headers to attach to commands. Empty for the Pilot Computer;
-        the Safety Computer subclass overrides this to inject its X-Safety-Token."""
-        return {}
-
     def requestSend(self, endPoint, data, verbose=False):
         """Send a POST request to the drone."""
         if self.IP_RC == "":
@@ -528,87 +515,92 @@ class DJIInterface:
         """Navigate to a waypoint with custom PID tuning parameters."""
         return self.requestSend(EP_TUNING, f"{latitude},{longitude},{altitude},{yaw},{kp_pos},{ki_pos},{kd_pos},{kp_yaw},{ki_yaw},{kd_yaw}")
 
-    def requestCaptureThermalImage(self, save_path=None, rgb_save_path=None, zoom_save_path=None):
-        """Shoot one H20T photo and retrieve every image it produces from that single shutter:
-        the radiometric thermal R-JPEG, the co-aligned wide visual RGB photo (the same scene shown
-        on the controller / streamed via WHIP), and the zoom-lens photo. Because they all come from
-        one shutter on the SD card, the views are inherently synchronized.
+    def requestCapture(self):
+        """Trigger ONE H20T shutter (no image download). Returns the capture descriptor.
 
-        The drone returns them as a single multipart/mixed response (parts named "thermal",
-        "visual" and "zoom"). Lenses the H20T is not configured to store are simply absent. A plain
-        image/* response is still accepted for backward compatibility.
-
-        Args:
-            save_path: where to write the thermal JPEG (default: timestamped thermal_image_*.jpg).
-            rgb_save_path: where to write the wide RGB JPEG (default: rgb_image_*.jpg).
-            zoom_save_path: where to write the zoom JPEG (default: zoom_image_*.jpg).
+        A single shutter is atomic: it exposes thermal, wide (RGB) and zoom simultaneously,
+        so there is no lens to choose here. Pass the returned captureId to requestDownload()
+        to fetch whichever lens images you want.
 
         Returns:
-            dict {"thermal": <path|None>, "rgb": <path|None>, "zoom": <path|None>} on success,
+            dict {"captureId": str, "thermal": fn|None, "wide": fn|None, "zoom": fn|None}
+            on success (fn is the on-camera filename, None if that lens was not stored),
             else False.
         """
         if self.IP_RC == "":
-            print("No IP_RC provided, cannot capture thermal image")
+            print("No IP_RC provided, cannot capture image")
             return False
-
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        if save_path is None:
-            save_path = f"thermal_image_{timestamp}.jpg"
-        if rgb_save_path is None:
-            rgb_save_path = f"rgb_image_{timestamp}.jpg"
-        if zoom_save_path is None:
-            zoom_save_path = f"zoom_image_{timestamp}.jpg"
-
         try:
-            # Shutter + on-camera download of up to three files takes several seconds; allow a
-            # generous timeout.
+            # Trip the shutter. The bridge returns a JSON descriptor naming the captureId
+            # and which lenses the H20T actually stored (no image yet).
             response = requests.post(
-                self.baseCommandUrl + EP_CAPTURE_THERMAL_IMAGE, data="",
-                headers=self._authHeaders(), timeout=120)
-
-            content_type = response.headers.get("Content-Type", "")
+                self.baseCommandUrl + EP_CAPTURE_THERMAL_IMAGE, data="", timeout=30)
             if response.status_code != 200:
-                print(f"Thermal capture failed: HTTP {response.status_code}, "
-                      f"Content-Type={content_type!r}, body={response.text[:200]!r}")
+                print(f"Capture failed: HTTP {response.status_code}, "
+                      f"body={response.text[:200]!r}")
                 return False
-
-            if content_type.startswith("multipart/"):
-                parts = _parse_multipart(response.content, content_type)
-                saved = {"thermal": None, "rgb": None, "zoom": None}
-
-                def _save(part_name, key, path, label):
-                    if not parts.get(part_name):
-                        return
-                    cam_name, data = parts[part_name]
-                    with open(path, "wb") as f:
-                        f.write(data)
-                    saved[key] = path
-                    print(f"{label} image saved to: {path} "
-                          f"(camera file: {cam_name}, {len(data)} bytes)")
-
-                _save("thermal", "thermal", save_path, "Thermal")
-                _save("visual", "rgb", rgb_save_path, "RGB")
-                _save("zoom", "zoom", zoom_save_path, "Zoom")
-
-                if saved["rgb"] is None and saved["zoom"] is None:
-                    print("No RGB/zoom image returned (H20T may be storing infrared only)")
-                return saved if saved["thermal"] else False
-
-            if content_type.startswith("image/"):
-                # Backward-compatible single-image (thermal-only) response.
-                with open(save_path, "wb") as f:
-                    f.write(response.content)
-                print(f"Thermal image saved to: {save_path}")
-                return {"thermal": save_path, "rgb": None, "zoom": None}
-
-            print(f"Thermal capture failed: unexpected Content-Type={content_type!r}, "
-                  f"body={response.text[:200]!r}")
+            info = response.json()
+            if info.get("error") or not info.get("captureId"):
+                print(f"Capture failed: {info}")
+                return False
+            return info
+        except (requests.exceptions.RequestException, ValueError) as e:
+            print(f"Error capturing image: {e}")
             return False
 
+    def requestDownload(self, capture_id, lenses=LENS_KEYS, out_dir=".", prefix=None):
+        """Download one or more lens images from a prior requestCapture().
+
+        Args:
+            capture_id: the "captureId" returned by requestCapture().
+            lenses: lens or lenses to download — "thermal", "wide", "zoom"; a single name,
+                a list/tuple, or a comma/space-separated string.
+            out_dir: directory to write the JPEGs into (created if missing).
+            prefix: optional filename prefix; files are "<prefix><lens>.jpg".
+
+        Returns:
+            dict {lens: path|None} (None where that lens failed to download), or False on a
+            bad argument.
+        """
+        if self.IP_RC == "":
+            print("No IP_RC provided, cannot download image")
+            return False
+        try:
+            wanted = canonical_lenses(lenses)
+        except ValueError as e:
+            print(f"Download error: {e}")
+            return False
+        if not wanted:
+            print("No lenses selected.")
+            return False
+
+        os.makedirs(out_dir, exist_ok=True)
+        files = {}
+        for lens in wanted:
+            save_path = os.path.join(out_dir, f"{prefix or ''}{lens}.jpg")
+            files[lens] = self._downloadOneLens(capture_id, lens, save_path)
+        return files
+
+    def _downloadOneLens(self, capture_id, lens, save_path):
+        """Download a single lens of a capture to save_path. Returns the path, or None on
+        failure. Shared by requestDownload() and requestCaptureThermalImage()."""
+        try:
+            response = requests.post(
+                self.baseCommandUrl + EP_DOWNLOAD_CAPTURED_IMAGE,
+                data=f"{capture_id},{lens}", timeout=120)
         except requests.exceptions.RequestException as e:
-            print(f"Error capturing thermal image: {e}")
-            return False
-        
+            print(f"{lens}: download error: {e}")
+            return None
+        content_type = response.headers.get("Content-Type", "")
+        if response.status_code != 200 or not content_type.startswith("image/"):
+            print(f"{lens}: download failed (HTTP {response.status_code}, "
+                  f"Content-Type={content_type!r}, body={response.text[:200]!r})")
+            return None
+        with open(save_path, "wb") as f:
+            f.write(response.content)
+        print(f"{lens} image saved to: {save_path} ({len(response.content)} bytes)")
+        return save_path
+
     def requestLRFMeasure(self):
         """Fire the H20T laser range finder once and return its reading."""
         response = self.requestSend(EP_LRF_MEASURE, "")
@@ -893,44 +885,20 @@ class DJIInterfaceLite:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             save_path = f"thermal_image_{timestamp}.jpg"
             
-        # Shutter + on-camera download of up to three files takes several seconds.
-        stem = save_path.rsplit('.', 1)[0].replace('thermal', '')
-        rgb_save_path = stem + "rgb.jpg"
-        zoom_save_path = stem + "zoom.jpg"
-
         try:
             response = requests.post(self.baseTelemUrl + EP_CAPTURE_THERMAL_IMAGE,
                                   data="",
-                                  timeout=120)
+                                  timeout=20)
 
-            content_type = response.headers.get('Content-Type', '')
-            if content_type.startswith('multipart/'):
-                parts = _parse_multipart(response.content, content_type)
-                if not parts.get('thermal'):
-                    print(f"Error: no thermal part in response: {response.text[:200]!r}")
-                    return SAVE_FAILURE
-                with open(save_path, 'wb') as f:
-                    f.write(parts['thermal'][1])
-                print(f"Thermal image saved to: {save_path}")
-                self.imagePaths.append(save_path)
-                for part_name, path, label in (('visual', rgb_save_path, 'RGB'),
-                                               ('zoom', zoom_save_path, 'Zoom')):
-                    if parts.get(part_name):
-                        with open(path, 'wb') as f:
-                            f.write(parts[part_name][1])
-                        print(f"{label} image saved to: {path}")
-                        self.imagePaths.append(path)
-                return SAVE_SUCCESS
-
-            if content_type.startswith('image/'):
+            if response.headers.get('Content-Type', '').startswith('image/'):
                 with open(save_path, 'wb') as f:
                     f.write(response.content)
                 print(f"Thermal image saved to: {save_path}")
                 self.imagePaths.append(save_path)
                 return SAVE_SUCCESS
-
-            print(f"Error: Received non-image response: {response.text}")
-            return SAVE_FAILURE
+            else:
+                print(f"Error: Received non-image response: {response.text}")
+                return SAVE_FAILURE
 
         except Exception as e:
             print(f"Error capturing thermal image: {str(e)}")
