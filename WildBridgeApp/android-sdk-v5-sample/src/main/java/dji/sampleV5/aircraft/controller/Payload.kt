@@ -272,20 +272,10 @@ object Payload {
         } catch (e: Exception) {
             Log.e(TAG, "Error taking thermal image: ${e.message}", e)
             return emptyList()
-        } finally {
-            // takePhoto switches the camera to PHOTO_NORMAL; restore video mode so the
-            // live feed isn't left in photo mode after a capture.
-            mainHandler.post {
-                mediaVM.setVideoMode(object : CommonCallbacks.CompletionCallback {
-                    override fun onSuccess() {
-                        Log.i(TAG, "Camera restored to video mode")
-                    }
-                    override fun onFailure(error: IDJIError) {
-                        Log.e(TAG, "Failed to restore video mode: ${error.description()}")
-                    }
-                })
-            }
         }
+        // Note: takePhoto switches the camera to PHOTO_NORMAL and we intentionally leave it
+        // there. Restoring VIDEO_NORMAL after each shot made the controller visibly flip out
+        // of image-capture mode ("blinking") between captures.
     }
 
     // A downloaded image held in memory, ready to be framed into the multipart response.

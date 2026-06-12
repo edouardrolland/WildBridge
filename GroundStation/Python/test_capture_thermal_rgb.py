@@ -24,7 +24,7 @@ from djiInterface import DJIInterface
 # ----------------------------------------------------------------------------
 # Hardcode the controller (RC) IP address here. This is the IP shown by the
 # WildBridge app / the RC's WLAN address, reachable on port 8080.
-IP_RC = "192.168.0.113"
+IP_RC = "192.168.1.195"
 # ----------------------------------------------------------------------------
 
 
