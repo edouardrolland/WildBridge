@@ -534,29 +534,31 @@ class DJIInterface:
         if self.IP_RC == "":
             print("No IP_RC provided, cannot capture image")
             return False
+        # Trip the shutter. The bridge returns a JSON descriptor naming the captureId
+        # and which lenses the H20T actually stored (no image yet).
         try:
-            # Trip the shutter. The bridge returns a JSON descriptor naming the captureId
-            # and which lenses the H20T actually stored (no image yet).
             response = requests.post(
                 self.baseCommandUrl + EP_CAPTURE_THERMAL_IMAGE, data="", timeout=30)
-            if response.status_code != 200:
-                print(f"Capture failed: HTTP {response.status_code}, "
-                      f"body={response.text[:200]!r}")
-                return False
-            info = response.json()
-            if info.get("error") or not info.get("captureId"):
-                print(f"Capture failed: {info}")
-                return False
-            return info
-        except (requests.exceptions.RequestException, ValueError) as e:
+        except requests.exceptions.RequestException as e:
             print(f"Error capturing image: {e}")
             return False
+        try:
+            info = response.json()
+        except ValueError:
+            print(f"Capture returned non-JSON: HTTP {response.status_code}, "
+                  f"body={response.text[:200]!r}")
+            return False
+        if info.get("error") or not info.get("captureId"):
+            print(f"Capture failed: {info}")
+            return False
+        return info
 
     def requestDownload(self, capture_id, lenses=LENS_KEYS, out_dir=".", prefix=None):
         """Download one or more lens images from a prior requestCapture().
 
         Args:
-            capture_id: the "captureId" returned by requestCapture().
+            capture_id: the "captureId" returned by requestCapture(), or the whole info
+                dict it returned (the captureId is extracted from it).
             lenses: lens or lenses to download — "thermal", "wide", "zoom"; a single name,
                 a list/tuple, or a comma/space-separated string.
             out_dir: directory to write the JPEGs into (created if missing).
@@ -568,6 +570,12 @@ class DJIInterface:
         """
         if self.IP_RC == "":
             print("No IP_RC provided, cannot download image")
+            return False
+        # Accept either the captureId string or the whole info dict from requestCapture().
+        if isinstance(capture_id, dict):
+            capture_id = capture_id.get("captureId")
+        if not capture_id:
+            print("Download error: no captureId")
             return False
         try:
             wanted = canonical_lenses(lenses)
@@ -587,7 +595,7 @@ class DJIInterface:
 
     def _downloadOneLens(self, capture_id, lens, save_path):
         """Download a single lens of a capture to save_path. Returns the path, or None on
-        failure. Shared by requestDownload() and requestCaptureThermalImage()."""
+        failure."""
         try:
             response = requests.post(
                 self.baseCommandUrl + EP_DOWNLOAD_CAPTURED_IMAGE,

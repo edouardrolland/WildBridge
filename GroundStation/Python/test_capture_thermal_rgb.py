@@ -21,63 +21,13 @@ import sys
 import time
 from datetime import datetime
 
-import requests
-
-from djiInterface import (
-    DJIInterface,
-    LENS_KEYS,
-    EP_CAPTURE_THERMAL_IMAGE,
-    EP_DOWNLOAD_CAPTURED_IMAGE,
-)
+from djiInterface import DJIInterface, LENS_KEYS
 
 # ----------------------------------------------------------------------------
 # Hardcode the controller (RC) IP address here. This is the IP shown by the
 # WildBridge app / the RC's WLAN address, reachable on port 8080.
 IP_RC = "192.168.1.195"
 # ----------------------------------------------------------------------------
-
-# lens name (as known by the bridge) -> output filename in the capture folder.
-LENS_FILENAMES = {
-    "thermal": "thermal.jpg",
-    "wide": "wide.jpg",
-    "zoom": "zoom.jpg",
-}
-
-
-def take_shutter(base_url):
-    """Trip one shutter. Returns (elapsed_seconds, info_dict | None).
-
-    info_dict is the bridge's JSON descriptor: {captureId, thermal, wide, zoom}.
-    """
-    start = time.perf_counter()
-    response = requests.post(base_url + EP_CAPTURE_THERMAL_IMAGE, data="", timeout=30)
-    elapsed = time.perf_counter() - start
-    try:
-        info = response.json()
-    except ValueError:
-        print(f"  capture returned non-JSON: HTTP {response.status_code}, "
-              f"body={response.text[:200]!r}")
-        return elapsed, None
-    if info.get("error") or not info.get("captureId"):
-        print(f"  capture failed: {info}")
-        return elapsed, None
-    return elapsed, info
-
-
-def download_lens(base_url, capture_id, lens, save_path):
-    """Download one lens from a prior shutter. Returns (elapsed_seconds, path | None)."""
-    start = time.perf_counter()
-    response = requests.post(
-        base_url + EP_DOWNLOAD_CAPTURED_IMAGE,
-        data=f"{capture_id},{lens}", timeout=120)
-    elapsed = time.perf_counter() - start
-    content_type = response.headers.get("Content-Type", "")
-    if response.status_code != 200 or not content_type.startswith("image/"):
-        print(f"  {lens}: download failed (HTTP {response.status_code}, {content_type!r})")
-        return elapsed, None
-    with open(save_path, "wb") as f:
-        f.write(response.content)
-    return elapsed, save_path
 
 
 def main():
@@ -88,7 +38,6 @@ def main():
     if drone.IP_RC == "":
         print("ERROR: no IP_RC set — aborting.")
         return 1
-    base_url = drone.baseCommandUrl
 
     # Save all images into a timestamped folder next to this script.
     out_dir = os.path.join(
@@ -99,8 +48,10 @@ def main():
 
     # --- 1) TAKE: one shutter exposes all lenses simultaneously -------------------
     print("\nTaking the picture(s) — one shutter (no download yet)...")
-    shutter_elapsed, info = take_shutter(base_url)
-    if info is None:
+    t0 = time.perf_counter()
+    info = drone.requestCapture()
+    shutter_elapsed = time.perf_counter() - t0
+    if not info:
         print("\nCapture FAILED. Check that:")
         print("  - the IP is correct and the bridge app is running,")
         print("  - the Pilot Computer currently holds control authority,")
@@ -119,8 +70,10 @@ def main():
         if not info.get(lens):
             print(f"  {lens:<7} -> skipped (not stored for this shutter)")
             continue
-        save_path = os.path.join(out_dir, LENS_FILENAMES[lens])
-        elapsed, path = download_lens(base_url, capture_id, lens, save_path)
+        t0 = time.perf_counter()
+        results = drone.requestDownload(capture_id, lens, out_dir=out_dir)
+        elapsed = time.perf_counter() - t0
+        path = results.get(lens) if results else None
         if path:
             dl[lens] = elapsed
             print(f"  {lens:<7} -> {path} ({os.path.getsize(path)} bytes) in {elapsed:.2f} s")
