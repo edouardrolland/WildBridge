@@ -14,18 +14,40 @@ class PID(
 ) {
     private var integral = 0.0
     private var previousError = 0.0
+    private var hasPreviousError = false
 
-    fun update(error: Double): Double {
+    /**
+     * Clear accumulated state (integral + derivative history). Call this when the
+     * setpoint changes discontinuously — e.g. a hot-swapped waypoint — so the sudden
+     * jump in error does not produce an integral/derivative kick.
+     */
+    fun reset() {
+        integral = 0.0
+        previousError = 0.0
+        hasPreviousError = false
+    }
+
+    /** Update using the fixed nominal timestep supplied at construction. */
+    fun update(error: Double): Double = update(error, dt)
+
+    /**
+     * Update using an explicitly measured timestep [dtSec]. Preferred for loops driven
+     * by a Handler, whose actual cadence drifts under main-thread load: feeding the real
+     * elapsed time keeps the integral/derivative terms correct instead of assuming [dt].
+     */
+    fun update(error: Double, dtSec: Double): Double {
         // Proportional term
         val p = kp * error
 
-        // Derivative term
-        val derivative = if (dt != 0.0) (error - previousError) / dt else 0.0
+        // Derivative term. Skipped on the very first sample after construction or reset(),
+        // otherwise a cold-start setpoint produces a spurious derivative spike.
+        val derivative = if (hasPreviousError && dtSec != 0.0) (error - previousError) / dtSec else 0.0
         val d = kd * derivative
         previousError = error
+        hasPreviousError = true
 
         // Integral term with anti-windup
-        integral += error * dt
+        integral += error * dtSec
 
         // Calculate output before applying integral term
         var output = p + d

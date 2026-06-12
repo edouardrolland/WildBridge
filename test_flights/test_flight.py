@@ -103,35 +103,35 @@ DRONE_PROFILES = {
     "MAVIC3": {
         "name": "Mavic 3 Enterprise",
         "maxHorizontalSpeedMps": 15.0, "maxGotoWpSpeedMps": 15.0,
-        "distanceKp": 0.65, "distanceKi": 0.0001, "distanceKd": 0.001,
+        "distanceKp": 0.65, "distanceKi": 0.0, "distanceKd": 0.001,
         "yawKp": 3.0, "maxYawRateDegS": 30.0, "defaultCruiseSpeedMps": 15.0,
         "payloadIndexType": None, "dropArmSwitchIndex": 0, "dropReleaseButtonIndex": 1,
     },
     "M300": {
         "name": "Matrice 300 RTK",
         "maxHorizontalSpeedMps": 25.0, "maxGotoWpSpeedMps": 25.0,
-        "distanceKp": 0.34, "distanceKi": 0.0001, "distanceKd": 0.001,
+        "distanceKp": 0.34, "distanceKi": 0.0, "distanceKd": 0.001,
         "yawKp": 3.0, "maxYawRateDegS": 30.0, "defaultCruiseSpeedMps": 25.0,
         "payloadIndexType": "RIGHT", "dropArmSwitchIndex": 3, "dropReleaseButtonIndex": 5,
     },
     "M350": {
         "name": "Matrice 350 RTK",
         "maxHorizontalSpeedMps": 25.0, "maxGotoWpSpeedMps": 25.0,
-        "distanceKp": 0.34, "distanceKi": 0.0001, "distanceKd": 0.001,
+        "distanceKp": 0.34, "distanceKi": 0.0, "distanceKd": 0.001,
         "yawKp": 3.0, "maxYawRateDegS": 30.0, "defaultCruiseSpeedMps": 3.0,
         "payloadIndexType": "RIGHT", "dropArmSwitchIndex": 3, "dropReleaseButtonIndex": 5,
     },
     "M400": {
         "name": "Matrice 400",
         "maxHorizontalSpeedMps": 25.0, "maxGotoWpSpeedMps": 25.0,
-        "distanceKp": 0.34, "distanceKi": 0.0001, "distanceKd": 0.001,
+        "distanceKp": 0.34, "distanceKi": 0.0, "distanceKd": 0.001,
         "yawKp": 3.0, "maxYawRateDegS": 30.0, "defaultCruiseSpeedMps": 25.0,
         "payloadIndexType": "PORT_3", "dropArmSwitchIndex": 3, "dropReleaseButtonIndex": 5,
     },
     "MINI4": {
         "name": "DJI Mini 4 Pro",
         "maxHorizontalSpeedMps": 15.0, "maxGotoWpSpeedMps": 5.0,
-        "distanceKp": 0.65, "distanceKi": 0.0001, "distanceKd": 0.001,
+        "distanceKp": 0.65, "distanceKi": 0.0, "distanceKd": 0.001,
         "yawKp": 3.0, "maxYawRateDegS": 30.0, "defaultCruiseSpeedMps": 2.0,
         "payloadIndexType": None, "dropArmSwitchIndex": 0, "dropReleaseButtonIndex": 1,
     },
@@ -334,11 +334,12 @@ def phase2_attitude(dji, rec, takeoff_alt, alt_agl):
     target_alt = (takeoff_alt or 0.0) + alt_agl
     print(f"   Target altitude: {target_alt:.1f} m (takeoff baseline {takeoff_alt or 0.0:.1f} + AGL {alt_agl:.1f})")
 
-    resp = dji.requestSendGotoAltitude(target_alt)
-    print(f"   DEBUG gotoAltitude response: {resp!r}")
-    if rejected(resp):
+    # Capture the seq so the reached check matches THIS command, not a latched previous one.
+    alt_seq = dji.requestSendGotoAltitude(target_alt)
+    print(f"   DEBUG gotoAltitude seq: {alt_seq!r}")
+    if alt_seq is None:
         rec.record("requestSendGotoAltitude", False,
-                   f"resp={resp!r}, mode={dji.getFlightMode()}, manualOverride={dji.isManualOverrideActive()}")
+                   f"rejected/no seq, mode={dji.getFlightMode()}, manualOverride={dji.isManualOverrideActive()}")
         return
 
     alt_debug = {"last_print": 0.0, "last_alt": None, "stagnant_s": 0.0}
@@ -364,12 +365,12 @@ def phase2_attitude(dji, rec, takeoff_alt, alt_agl):
             print(
                 "\n"
                 f"   DEBUG phase2-alt: current={alt_now:.2f}m target={target_alt:.2f}m "
-                f"delta={target_alt - alt_now:.2f}m altitudeReached={dji.isAltitudeReached()} "
+                f"delta={target_alt - alt_now:.2f}m altitudeReached={dji.isAltitudeReached(alt_seq)} "
                 f"mode={dji.getFlightMode()} manualOverride={dji.isManualOverrideActive()} "
                 f"stagnantFor={alt_debug['stagnant_s']:.1f}s"
             )
 
-    ok = wait_for(lambda: dji.isAltitudeReached()
+    ok = wait_for(lambda: dji.isAltitudeReached(alt_seq)
                   or abs(dji.getLocation().get("altitude", -999) - target_alt) <= ALT_TOLERANCE_M,
                   on_tick=tick_alt)
     print()
@@ -378,13 +379,13 @@ def phase2_attitude(dji, rec, takeoff_alt, alt_agl):
 
     start_heading = dji.getHeading()
     target_yaw = (start_heading + YAW_TEST_DELTA) % 360
-    resp = dji.requestSendGotoYaw(target_yaw)
-    print(f"   DEBUG gotoYaw response: {resp!r}")
-    if rejected(resp):
+    yaw_seq = dji.requestSendGotoYaw(target_yaw)
+    print(f"   DEBUG gotoYaw seq: {yaw_seq!r}")
+    if yaw_seq is None:
         rec.record("requestSendGotoYaw", False,
-                   f"resp={resp!r}, mode={dji.getFlightMode()}, manualOverride={dji.isManualOverrideActive()}")
+                   f"rejected/no seq, mode={dji.getFlightMode()}, manualOverride={dji.isManualOverrideActive()}")
         return
-    ok = wait_for(lambda: dji.isYawReached()
+    ok = wait_for(lambda: dji.isYawReached(yaw_seq)
                   or abs(((dji.getHeading() - target_yaw + 180) % 360) - 180) <= 10,
                   on_tick=lambda: print(f"      heading={dji.getHeading():.1f} deg", end="\r"))
     rec.record("requestSendGotoYaw", ok,
@@ -417,25 +418,28 @@ def phase3_waypoint_max_speed(dji, rec, profile, leg_distance, bearing_deg=0.0):
         peak["v"] = max(peak["v"], v)
         print(f"      speed={v:4.1f} m/s  dist_home={dji.getDistanceToHome():.1f} m", end="\r")
 
-    dji.requestSendGoToWPwithPID(tgt_lat, tgt_lon, alt, yaw, speed=max_speed)
-    reached = wait_for(lambda: dji.requestWaypointStatus() == "true",
+    # Capture the seq the app assigns to THIS command and match telemetry against it, so a
+    # stale latched "reached" from a previous waypoint can't be mistaken for arrival here.
+    seq = dji.requestSendGoToWPwithPID(tgt_lat, tgt_lon, alt, yaw, speed=max_speed)
+    reached = wait_for(lambda: dji.isWaypointReached(seq),
                        timeout=PHASE_TIMEOUT_S, on_tick=tick_out)
     rec.record("requestSendGoToWPwithPID (out)", reached,
-               f"requested {max_speed} m/s, peak observed {peak['v']:.1f} m/s")
-    # requestWaypointStatus is validated by the fact the wait above resolved.
-    rec.record("requestWaypointStatus", reached, f"waypointReached={dji.requestWaypointStatus()}")
+               f"requested {max_speed} m/s, peak observed {peak['v']:.1f} m/s, seq={seq}")
+    # isWaypointReached(seq) is validated by the fact the wait above resolved for this seq.
+    rec.record("requestWaypointStatus", reached, f"waypointReached={dji.isWaypointReached(seq)} seq={seq}")
 
     # Speed sanity: did we actually approach the commanded maximum?
     rec.record("max-speed reached (>=70% of cap)", peak["v"] >= 0.7 * max_speed,
                f"peak {peak['v']:.1f} / {max_speed} m/s")
 
-    # Return leg back to the start point.
+    # Return leg back to the start point. A fresh seq means the stale "reached" from the
+    # outbound leg above cannot satisfy this wait before the drone actually flies back.
     peak["v"] = 0.0
-    dji.requestSendGoToWPwithPID(start_lat, start_lon, alt, yaw, speed=max_speed)
-    reached = wait_for(lambda: dji.requestWaypointStatus() == "true",
+    seq = dji.requestSendGoToWPwithPID(start_lat, start_lon, alt, yaw, speed=max_speed)
+    reached = wait_for(lambda: dji.isWaypointReached(seq),
                        timeout=PHASE_TIMEOUT_S, on_tick=tick_out)
     rec.record("requestSendGoToWPwithPID (return)", reached,
-               f"peak observed {peak['v']:.1f} m/s")
+               f"peak observed {peak['v']:.1f} m/s, seq={seq}")
 
 
 def phase4_payload(dji, rec, profile, auto):

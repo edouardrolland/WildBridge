@@ -69,7 +69,10 @@ object DroneController {
     const val WP_ACCEPT_YAW_DEG = 4.0       // yaw error in degrees
 
     private fun distancePidKp(): Double = DroneControlProfiles.activeProfile().distanceKp
+    private fun distancePidKi(): Double = DroneControlProfiles.activeProfile().distanceKi
+    private fun distancePidKd(): Double = DroneControlProfiles.activeProfile().distanceKd
     private fun yawPidKp(): Double = DroneControlProfiles.activeProfile().yawKp
+    private fun maxYawRateDegS(): Double = DroneControlProfiles.activeProfile().maxYawRateDegS
     private fun waypointPidOutputLimit(): Double = DroneControlProfiles.activeProfile().maxHorizontalSpeedMps
     private fun maxHorizontalAccelMps2(): Double = DroneControlProfiles.activeProfile().maxHorizontalAccelMps2
 
@@ -193,8 +196,17 @@ object DroneController {
     }
 
     @Volatile private var _isWaypointReached = false
+    // Monotonic id assigned to every waypoint navigation request (fresh start OR hot-swap).
+    // Echoed in telemetry as "waypointSeq" so a ground station can tell whether a streamed
+    // "waypointReached" refers to the target it just commanded or a stale latched value from
+    // the previous one. Incremented from the HTTP server thread, read from the telemetry thread.
+    private val _waypointSeq = java.util.concurrent.atomic.AtomicLong(0)
     @Volatile private var _isYawReached = false
+    // Same role as _waypointSeq, for gotoYaw — echoed in telemetry as "yawSeq".
+    private val _yawSeq = java.util.concurrent.atomic.AtomicLong(0)
     @Volatile private var _isAltitudeReached = false
+    // Same role as _waypointSeq, for gotoAltitude — echoed in telemetry as "altitudeSeq".
+    private val _altitudeSeq = java.util.concurrent.atomic.AtomicLong(0)
     @Volatile private var _isIntermediaryWaypointReached = false
 
     // Hot-swappable waypoint target for smooth PID transitions.
@@ -209,6 +221,18 @@ object DroneController {
 
     @Volatile
     private var activeWaypointTarget: WaypointTarget? = null
+
+    // True only while the *waypoint* PID loop is the active control loop. controlLoopEnabled
+    // is shared by every loop type (gotoYaw / gotoAltitude / navigateTrajectory), but only the
+    // waypoint loop consumes activeWaypointTarget — so a hot-swap must check this flag, otherwise
+    // a waypoint command issued while another loop runs would be stashed and silently dropped.
+    @Volatile
+    private var activeLoopIsWaypoint = false
+
+    // Set when a target is hot-swapped into a running waypoint loop. The loop clears it on the
+    // next tick by reset()-ing its PIDs, so the discontinuous jump in error doesn't kick.
+    @Volatile
+    private var waypointPidResetRequested = false
 
     // Control loop management - to prevent ghost waypoint navigation
     private var activeControlLoopHandler: Handler? = null
@@ -256,7 +280,9 @@ object DroneController {
         controlLoopEnabled = false
         currentControlLoopId++
         activeWaypointTarget = null
-        
+        activeLoopIsWaypoint = false
+        waypointPidResetRequested = false
+
         activeControlLoopRunnable?.let { runnable ->
             activeControlLoopHandler?.removeCallbacks(runnable)
         }
@@ -560,11 +586,14 @@ object DroneController {
         }
     }
 
-    fun gotoYaw(targetYaw: Double) {
+    /** Rotate to [targetYaw]. Returns the seq id published in telemetry as "yawSeq" so a caller
+     *  can match a streamed "yawReached" to this command rather than a latched previous one. */
+    fun gotoYaw(targetYaw: Double): Long {
         stopCurrentMission()
         // Start new control loop session
         val loopId = startNewControlLoopSession()
-        
+
+        val seq = _yawSeq.incrementAndGet()
         _isYawReached = false
         val controlLoopYaw = Handler(Looper.getMainLooper())
         val updateInterval = 100.0 // Update every 100 ms
@@ -623,12 +652,17 @@ object DroneController {
         activeControlLoopHandler = controlLoopYaw
         activeControlLoopRunnable = runnable
         controlLoopYaw.post(runnable)
+        return seq
     }
 
-    fun gotoAltitude(targetAltitude: Double) {
+    /** Climb/descend to [targetAltitude]. Returns the seq id published in telemetry as
+     *  "altitudeSeq" so a caller can match a streamed "altitudeReached" to this command. */
+    fun gotoAltitude(targetAltitude: Double): Long {
         stopCurrentMission()
         // Start new control loop session
         val loopId = startNewControlLoopSession()
+
+        val seq = _altitudeSeq.incrementAndGet()
 
         // Enable Virtual Stick and advanced mode
         // NOTE: Use VM directly, not enableVirtualStick() which would cancel the loop we just started
@@ -700,6 +734,7 @@ object DroneController {
         activeControlLoopHandler = controlLoopHandler
         activeControlLoopRunnable = runnable
         controlLoopHandler.post(runnable)
+        return seq
     }
 
     fun gotoWP(targetLatitude: Double, targetLongitude: Double, targetAltitude: Double) {
@@ -816,28 +851,41 @@ object DroneController {
         controlLoop.post(runnable)
     }
 
-    fun navigateToWaypointWithPID(targetLatitude: Double, targetLongitude: Double, targetAlt: Double, targetYaw: Double, maxSpeed: Double) {
+    /**
+     * Navigate to a waypoint under the PID loop. Returns the monotonic sequence id assigned to
+     * this request; the same value is published in telemetry as "waypointSeq" so a caller can
+     * confirm a streamed "waypointReached" belongs to this target and not a latched previous one.
+     */
+    fun navigateToWaypointWithPID(targetLatitude: Double, targetLongitude: Double, targetAlt: Double, targetYaw: Double, maxSpeed: Double): Long {
         val newTarget = WaypointTarget(targetLatitude, targetLongitude, targetAlt, targetYaw, maxSpeed)
+        // New target → new id, and the reached latch drops to false until this target is reached.
+        val seq = _waypointSeq.incrementAndGet()
         _isWaypointReached = false
 
-        // If a PID loop is already running, just hot-swap the target.
-        // The running loop reads activeWaypointTarget each tick and will smoothly steer to the new waypoint
-        // without stopping, restarting, or resetting PID state.
-        if (controlLoopEnabled) {
+        // If a *waypoint* PID loop is already running, just hot-swap the target.
+        // The running loop reads activeWaypointTarget each tick and will smoothly steer to the new
+        // waypoint without a cold restart. We must check activeLoopIsWaypoint, not just
+        // controlLoopEnabled: that flag is shared by gotoYaw/gotoAltitude/navigateTrajectory, none
+        // of which consume activeWaypointTarget — so swapping into one of those would lose the
+        // command. The reset request clears the PID derivative/integral kick from the error jump.
+        if (controlLoopEnabled && activeLoopIsWaypoint) {
             activeWaypointTarget = newTarget
-            return
+            waypointPidResetRequested = true
+            return seq
         }
 
-        // No active loop — start a fresh one
+        // No active waypoint loop — start a fresh one (this also cancels any other active loop).
         // Set target AFTER startNewControlLoopSession() because it calls cancelActiveControlLoop()
         // which clears activeWaypointTarget.
         stopCurrentMission()
         val loopId = startNewControlLoopSession()
         activeWaypointTarget = newTarget
+        activeLoopIsWaypoint = true
 
-        val updateInterval = 100.0  // Update every 100 ms
-        val maxYawRate = 30.0 // degrees per second
+        val updateInterval = 100.0  // Nominal update period (ms); real dt is measured each tick.
+        val maxYawRate = maxYawRateDegS() // degrees per second, from the active drone profile
         var lastCommandedSpeed = 0.0
+        var lastTickMs = 0L  // SystemClock.elapsedRealtime() of the previous tick, 0 = first tick
 
         virtualStickVM?.enableVirtualStickAdvancedMode()
         // NOTE: Use VM directly, not enableVirtualStick() which would cancel the loop we just started
@@ -849,8 +897,8 @@ object DroneController {
         })
         virtualStickVM?.enableVirtualStickAdvancedMode()
 
-        // PID gains are selected from the connected aircraft type at runtime.
-        val distancePID = PID(distancePidKp(), 0.0001, 0.001, updateInterval/1000, 0.0 to waypointPidOutputLimit())
+        // PID gains are all selected from the connected aircraft profile at runtime.
+        val distancePID = PID(distancePidKp(), distancePidKi(), distancePidKd(), updateInterval/1000, 0.0 to waypointPidOutputLimit())
         val yawPID = PID(yawPidKp(), 0.0000, 0.00, updateInterval/1000, -maxYawRate to maxYawRate)
 
         val controlLoop = Handler(Looper.getMainLooper())
@@ -878,18 +926,34 @@ object DroneController {
                     return
                 }
 
+                // Measure the real timestep instead of assuming updateInterval. The loop runs on
+                // the main Looper, whose cadence drifts under load; clamp so a stalled thread can't
+                // inject a huge dt spike into the PID derivative/integral or the accel limiter.
+                val nowMs = android.os.SystemClock.elapsedRealtime()
+                val dtSec = if (lastTickMs == 0L) updateInterval / 1000.0
+                            else ((nowMs - lastTickMs) / 1000.0).coerceIn(0.02, 0.5)
+                lastTickMs = nowMs
+
+                // A hot-swapped target is a discontinuous setpoint — clear PID history once so the
+                // jump in distance/yaw error doesn't produce an integral/derivative kick.
+                if (waypointPidResetRequested) {
+                    waypointPidResetRequested = false
+                    distancePID.reset()
+                    yawPID.reset()
+                }
+
                 val currentPosition = getLocation3D()
                 val currentYaw = getHeading()
 
                 val distance = calculateDistance(target.latitude, target.longitude, currentPosition.latitude, currentPosition.longitude)
-                val pidSpeed = distancePID.update(distance).coerceAtMost(target.maxSpeed)
-                val maxSpeedStep = maxHorizontalAccelMps2() * (updateInterval / 1000.0)
+                val pidSpeed = distancePID.update(distance, dtSec).coerceAtMost(target.maxSpeed)
+                val maxSpeedStep = maxHorizontalAccelMps2() * dtSec
                 val targetSpeed = pidSpeed.coerceAtMost(lastCommandedSpeed + maxSpeedStep)
                 lastCommandedSpeed = targetSpeed
                 val movementDirection = calculateBearing(currentPosition.latitude, currentPosition.longitude, target.latitude, target.longitude).toDouble()
 
                 val yawError = normalizeAngle(target.yaw - currentYaw)
-                val angularVelocity = yawPID.update(yawError)
+                val angularVelocity = yawPID.update(yawError, dtSec)
 
                 val movementDirectionRelative = normalizeAngle(movementDirection - currentYaw) // Relative to the drone's heading
                 val forwardSpeed = targetSpeed * cos(Math.toRadians(movementDirectionRelative))
@@ -939,6 +1003,7 @@ object DroneController {
         activeControlLoopHandler = controlLoop
         activeControlLoopRunnable = runnable
         controlLoop.post(runnable)
+        return seq
     }
 
     fun navigateTrajectory(
@@ -1575,6 +1640,22 @@ object DroneController {
     // Getter pour isWaypointReached
     fun isWaypointReached(): Boolean {
         return _isWaypointReached
+    }
+
+    // Id of the most recently accepted waypoint request. Pair this with isWaypointReached()
+    // in telemetry so a client can match "reached" to a specific commanded target.
+    fun getWaypointSeq(): Long {
+        return _waypointSeq.get()
+    }
+
+    // Id of the most recently accepted gotoYaw request — pair with isYawReached().
+    fun getYawSeq(): Long {
+        return _yawSeq.get()
+    }
+
+    // Id of the most recently accepted gotoAltitude request — pair with isAltitudeReached().
+    fun getAltitudeSeq(): Long {
+        return _altitudeSeq.get()
     }
 
     // Getter pour isYawReached

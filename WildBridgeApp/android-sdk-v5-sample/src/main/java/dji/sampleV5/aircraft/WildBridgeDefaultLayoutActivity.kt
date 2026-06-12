@@ -1917,7 +1917,7 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
             val phoneLocationJson = """{"latitude":$phoneLat,"longitude":$phoneLon,"heading":$phoneHeading,"pressure":$phonePressure,"battery":$phoneBattery,"wifiRssi":$wifiRssi}"""
             val webRtcJson = lastWebRTCMetrics.toTelemetryJson()
 
-            return """{"droneName":"$droneName","speed":${mock.velocity},"heading":${mock.heading},"attitude":${mock.attitude},"location":${mock.location},"phoneLocation":$phoneLocationJson,"webRtc":$webRtcJson,"gimbalAttitude":${mock.gimbalAttitude},"gimbalJointAttitude":${mock.gimbalAttitude},"zoomFl":24,"hybridFl":24,"opticalFl":24,"zoomRatio":1.0,"batteryLevel":${mock.batteryPercent},"satelliteCount":${mock.satelliteCount},"homeLocation":{"latitude":${mock.location.latitude},"longitude":${mock.location.longitude}},"distanceToHome":0.0,"waypointReached":false,"intermediaryWaypointReached":false,"yawReached":true,"altitudeReached":true,"isRecording":true,"homeSet":true,"remainingFlightTime":1320,"timeNeededToGoHome":45,"timeNeededToLand":18,"totalTime":63,"maxRadiusCanFlyAndGoHome":900,"remainingCharge":${mock.batteryPercent},"batteryNeededToLand":12,"batteryNeededToGoHome":18,"seriousLowBatteryThreshold":10,"lowBatteryThreshold":20,"flightMode":"${mock.flightMode}","isManualOverrideActive":false,"autoSensingActive":$isAutoSensingActive,"detectedTargets":${DetectedTarget.listToJsonArray(currentDetectedTargets)}}"""
+            return """{"droneName":"$droneName","speed":${mock.velocity},"heading":${mock.heading},"attitude":${mock.attitude},"location":${mock.location},"phoneLocation":$phoneLocationJson,"webRtc":$webRtcJson,"gimbalAttitude":${mock.gimbalAttitude},"gimbalJointAttitude":${mock.gimbalAttitude},"zoomFl":24,"hybridFl":24,"opticalFl":24,"zoomRatio":1.0,"batteryLevel":${mock.batteryPercent},"satelliteCount":${mock.satelliteCount},"homeLocation":{"latitude":${mock.location.latitude},"longitude":${mock.location.longitude}},"distanceToHome":0.0,"waypointReached":false,"waypointSeq":0,"intermediaryWaypointReached":false,"yawReached":true,"yawSeq":0,"altitudeReached":true,"altitudeSeq":0,"isRecording":true,"homeSet":true,"remainingFlightTime":1320,"timeNeededToGoHome":45,"timeNeededToLand":18,"totalTime":63,"maxRadiusCanFlyAndGoHome":900,"remainingCharge":${mock.batteryPercent},"batteryNeededToLand":12,"batteryNeededToGoHome":18,"seriousLowBatteryThreshold":10,"lowBatteryThreshold":20,"flightMode":"${mock.flightMode}","isManualOverrideActive":false,"autoSensingActive":$isAutoSensingActive,"detectedTargets":${DetectedTarget.listToJsonArray(currentDetectedTargets)}}"""
         }
 
         val goHomeInfo = goHomeAssessmentProcessor.value
@@ -1939,9 +1939,12 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
             homeLocation.latitude, homeLocation.longitude
         )
         val waypointReached = DroneController.isWaypointReached()
+        val waypointSeq = DroneController.getWaypointSeq()
         val intermediaryWaypointReached = DroneController.isIntermediaryWaypointReached()
         val yawReached = DroneController.isYawReached()
+        val yawSeq = DroneController.getYawSeq()
         val altitudeReached = DroneController.isAltitudeReached()
+        val altitudeSeq = DroneController.getAltitudeSeq()
         val isRecording = isRecordingKey.get()
         val homeSet = isHomeSet()
         val flightMode = getFlightMode().name
@@ -1967,7 +1970,7 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
         val phoneLocationJson = """{"latitude":$phoneLat,"longitude":$phoneLon,"heading":$phoneHeading,"pressure":$phonePressure,"battery":$phoneBattery,"wifiRssi":$wifiRssi}"""
         val webRtcJson = lastWebRTCMetrics.toTelemetryJson()
 
-        return """{"droneName":"$droneName","speed":$speed,"heading":$heading,"attitude":$attitude,"location":$location,"phoneLocation":$phoneLocationJson,"webRtc":$webRtcJson,"gimbalAttitude":$gimbalAttitude,"gimbalJointAttitude":$gimbalJointAttitude,"zoomFl":$zoomFl,"hybridFl":$hybridFl,"opticalFl":$opticalFl,"zoomRatio":$zoomRatio,"batteryLevel":$batteryLevel,"satelliteCount":$satelliteCount,"homeLocation":$homeLocation,"distanceToHome":$distanceToHome,"waypointReached":$waypointReached,"intermediaryWaypointReached":$intermediaryWaypointReached,"yawReached":$yawReached,"altitudeReached":$altitudeReached,"isRecording":$isRecording,"homeSet":$homeSet,"remainingFlightTime":$remainingFlightTime,"timeNeededToGoHome":$timeNeededToGoHome,"timeNeededToLand":$timeNeededToLand,"totalTime":$totalTime,"maxRadiusCanFlyAndGoHome":$maxRadiusCanFlyAndGoHome,"remainingCharge":$remainingCharge,"batteryNeededToLand":$batteryNeededToLand,"batteryNeededToGoHome":$batteryNeededToGoHome,"seriousLowBatteryThreshold":$seriousLowBatteryThreshold,"lowBatteryThreshold":$lowBatteryThreshold,"flightMode":"$flightMode","isManualOverrideActive":${DroneController.isManualOverrideActive},"autoSensingActive":$isAutoSensingActive,"detectedTargets":${DetectedTarget.listToJsonArray(currentDetectedTargets)}}"""
+        return """{"droneName":"$droneName","speed":$speed,"heading":$heading,"attitude":$attitude,"location":$location,"phoneLocation":$phoneLocationJson,"webRtc":$webRtcJson,"gimbalAttitude":$gimbalAttitude,"gimbalJointAttitude":$gimbalJointAttitude,"zoomFl":$zoomFl,"hybridFl":$hybridFl,"opticalFl":$opticalFl,"zoomRatio":$zoomRatio,"batteryLevel":$batteryLevel,"satelliteCount":$satelliteCount,"homeLocation":$homeLocation,"distanceToHome":$distanceToHome,"waypointReached":$waypointReached,"waypointSeq":$waypointSeq,"intermediaryWaypointReached":$intermediaryWaypointReached,"yawReached":$yawReached,"yawSeq":$yawSeq,"altitudeReached":$altitudeReached,"altitudeSeq":$altitudeSeq,"isRecording":$isRecording,"homeSet":$homeSet,"remainingFlightTime":$remainingFlightTime,"timeNeededToGoHome":$timeNeededToGoHome,"timeNeededToLand":$timeNeededToLand,"totalTime":$totalTime,"maxRadiusCanFlyAndGoHome":$maxRadiusCanFlyAndGoHome,"remainingCharge":$remainingCharge,"batteryNeededToLand":$batteryNeededToLand,"batteryNeededToGoHome":$batteryNeededToGoHome,"seriousLowBatteryThreshold":$seriousLowBatteryThreshold,"lowBatteryThreshold":$lowBatteryThreshold,"flightMode":"$flightMode","isManualOverrideActive":${DroneController.isManualOverrideActive},"autoSensingActive":$isAutoSensingActive,"detectedTargets":${DetectedTarget.listToJsonArray(currentDetectedTargets)}}"""
     }
 
     // ==================== HTTP Server ====================
@@ -2184,16 +2187,16 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
                             return "REJECTED: Manual override active. Deactivate manual override first."
                         }
                         val yaw = postData.split(",")[0].toDouble()
-                        DroneController.gotoYaw(yaw)
-                        "Received: yaw: $yaw"
+                        val seq = DroneController.gotoYaw(yaw)
+                        "YAW_ACCEPTED seq=$seq yaw: $yaw"
                     }
                     "/send/gotoAltitude" -> {
                         if (DroneController.shouldRejectAutonomousCommand("gotoAltitude")) {
                             return "REJECTED: Manual override active. Deactivate manual override first."
                         }
                         val targetAltitude = postData.split(",")[0].toDouble()
-                        DroneController.gotoAltitude(targetAltitude)
-                        "Received: Altitude: $targetAltitude"
+                        val seq = DroneController.gotoAltitude(targetAltitude)
+                        "ALTITUDE_ACCEPTED seq=$seq Altitude: $targetAltitude"
                     }
                     "/send/camera/zoom" -> {
                         val targetZoom = postData.toDouble()
@@ -2247,8 +2250,10 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
                         val altitude = cmd[2].toDouble()
                         val yaw = cmd[3].toDouble()
                         val maxSpeed = cmd[4].toDouble()
-                        DroneController.navigateToWaypointWithPID(latitude, longitude, altitude, yaw, maxSpeed)
-                        "Waypoint command received: Latitude=$latitude, Longitude=$longitude, Altitude=$altitude, Yaw=$yaw, MaxSpeed=$maxSpeed"
+                        val seq = DroneController.navigateToWaypointWithPID(latitude, longitude, altitude, yaw, maxSpeed)
+                        // seq=<n> lets the caller match the streamed telemetry "waypointSeq"/"waypointReached"
+                        // to THIS command, instead of a stale latched value from the previous waypoint.
+                        "WAYPOINT_ACCEPTED seq=$seq Latitude=$latitude, Longitude=$longitude, Altitude=$altitude, Yaw=$yaw, MaxSpeed=$maxSpeed"
                     }
                     "/send/navigateTrajectory" -> {
                         if (DroneController.shouldRejectAutonomousCommand("navigateTrajectory")) {

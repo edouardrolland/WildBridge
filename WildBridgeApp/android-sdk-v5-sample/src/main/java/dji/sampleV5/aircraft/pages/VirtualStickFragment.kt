@@ -352,22 +352,22 @@ class VirtualStickFragment : DJIFragment() {
                             return "REJECTED: Manual override active. Deactivate manual override first."
                         }
                         val yaw = postData.split(",")[0].toDouble()
-                        DroneController.gotoYaw(yaw)
+                        val seq = DroneController.gotoYaw(yaw)
                         mainHandler.post {
                             ToastUtils.showToast("Goto yaw: $yaw degrees")
                         }
-                        "Received: yaw: $yaw"
+                        "YAW_ACCEPTED seq=$seq yaw: $yaw"
                     }
                     "/send/gotoAltitude" -> {
                         if (DroneController.shouldRejectAutonomousCommand("gotoAltitude")) {
                             return "REJECTED: Manual override active. Deactivate manual override first."
                         }
                         val targetAltitude = postData.split(",")[0].toDouble()
-                        DroneController.gotoAltitude(targetAltitude)
+                        val seq = DroneController.gotoAltitude(targetAltitude)
                         mainHandler.post {
                             ToastUtils.showToast("Goto altitude: $targetAltitude m")
                         }
-                        "Received: Altitude: $targetAltitude"
+                        "ALTITUDE_ACCEPTED seq=$seq Altitude: $targetAltitude"
                     }
                     "/send/camera/zoom" -> {
                         val targetZoom = postData.toDouble()
@@ -446,8 +446,10 @@ class VirtualStickFragment : DJIFragment() {
                         val altitude = cmd[2].toDouble()
                         val yaw = cmd[3].toDouble()
                         val maxSpeed = cmd[4].toDouble()
-                        DroneController.navigateToWaypointWithPID(latitude, longitude, altitude, yaw, maxSpeed)
-                        "Waypoint command received: Latitude=$latitude, Longitude=$longitude, Altitude=$altitude, Yaw=$yaw, MaxSpeed=$maxSpeed"
+                        val seq = DroneController.navigateToWaypointWithPID(latitude, longitude, altitude, yaw, maxSpeed)
+                        // seq=<n> lets the caller match the streamed telemetry "waypointSeq"/"waypointReached"
+                        // to THIS command, instead of a stale latched value from the previous waypoint.
+                        "WAYPOINT_ACCEPTED seq=$seq Latitude=$latitude, Longitude=$longitude, Altitude=$altitude, Yaw=$yaw, MaxSpeed=$maxSpeed"
                     }
                     "/send/navigateTrajectory" -> {
                         if (DroneController.shouldRejectAutonomousCommand("navigateTrajectory")) {
@@ -1204,9 +1206,12 @@ class VirtualStickFragment : DJIFragment() {
         val homeLocation = getLocationHome().toString()
         val distanceToHome = DroneController.calculateDistance(getLocation3D().latitude, getLocation3D().longitude, getLocationHome().latitude, getLocationHome().longitude).toString()
         val waypointReached = DroneController.isWaypointReached()
+        val waypointSeq = DroneController.getWaypointSeq()
         val intermediaryWaypointReached = DroneController.isIntermediaryWaypointReached()
         val yawReached = DroneController.isYawReached()
+        val yawSeq = DroneController.getYawSeq()
         val altitudeReached = DroneController.isAltitudeReached()
+        val altitudeSeq = DroneController.getAltitudeSeq()
         val isRecording = isRecording.get().toString()
         val homeSet = isHomeSet().toString()
         val flightMode = "\"${getFlightMode().name}\""
@@ -1224,8 +1229,8 @@ class VirtualStickFragment : DJIFragment() {
                 "\"zoomFl\":$zoomFl,\"hybridFl\":$hybridFl,\"opticalFl\":$opticalFl," +
                 "\"zoomRatio\":$zoomRatio,\"batteryLevel\":$batteryLevel,\"satelliteCount\":$satelliteCount," +
                 "\"homeLocation\":$homeLocation,\"distanceToHome\":$distanceToHome," +
-                "\"waypointReached\":$waypointReached,\"intermediaryWaypointReached\":$intermediaryWaypointReached," +
-                "\"yawReached\":$yawReached,\"altitudeReached\":$altitudeReached,\"isRecording\":$isRecording," +
+                "\"waypointReached\":$waypointReached,\"waypointSeq\":$waypointSeq,\"intermediaryWaypointReached\":$intermediaryWaypointReached," +
+                "\"yawReached\":$yawReached,\"yawSeq\":$yawSeq,\"altitudeReached\":$altitudeReached,\"altitudeSeq\":$altitudeSeq,\"isRecording\":$isRecording," +
                 "\"homeSet\":$homeSet,\"remainingFlightTime\":$remainingFlightTime," +
                 "\"timeNeededToGoHome\":$timeNeededToGoHome,\"timeNeededToLand\":$timeNeededToLand," +
                 "\"totalTime\":$totalTime,\"maxRadiusCanFlyAndGoHome\":$maxRadiusCanFlyAndGoHome," +

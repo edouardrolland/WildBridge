@@ -1,5 +1,6 @@
 import requests
 import ast
+import re
 import sys
 import time
 import cv2
@@ -283,9 +284,21 @@ class DJIInterface:
         """Get distance to home in meters."""
         return self.getTelemetry().get("distanceToHome", 0.0)
     
-    def isWaypointReached(self):
-        """Check if the current waypoint has been reached."""
-        return self.getTelemetry().get("waypointReached", False)
+    def getWaypointSeq(self):
+        """Id of the waypoint the streamed 'waypointReached' currently refers to.
+
+        Mirrors DroneController._waypointSeq, incremented by the app for every
+        requestSendGoToWPwithPID. Returns -1 if telemetry hasn't reported it yet.
+        """
+        return self.getTelemetry().get("waypointSeq", -1)
+
+    def isWaypointReached(self, seq=None):
+        """Check if a commanded waypoint has been reached."""
+        telemetry = self.getTelemetry()
+        reached = telemetry.get("waypointReached", False)
+        if seq is None:
+            return reached
+        return reached and telemetry.get("waypointSeq", -1) == seq
     
     def isIntermediaryWaypointReached(self):
         """Check if an intermediary waypoint has been reached."""
@@ -424,15 +437,28 @@ class DJIInterface:
 
     def requestSendGoToWPwithPID(self, latitude, longitude, altitude, yaw, speed: float = 5.0):
         """Navigate to a waypoint with PID control.
-        
+
         Args:
             latitude: Target latitude
             longitude: Target longitude
             altitude: Target altitude
             yaw: Target yaw angle
             speed: Max speed in m/s (default 5.0)
+
+        Returns:
+            int: the sequence id the app assigned to this request (parsed from the
+                 "WAYPOINT_ACCEPTED seq=<n> ..." response). Pass it to
+                 isWaypointReached(seq) to avoid the stale-latch race.
+            None: if the command was rejected or the response had no seq.
         """
-        return self.requestSend(EP_GOTO_WP_PID, f"{latitude},{longitude},{altitude},{yaw},{speed}")
+        response = self.requestSend(EP_GOTO_WP_PID, f"{latitude},{longitude},{altitude},{yaw},{speed}")
+        return self._parseWaypointSeq(response)
+
+    @staticmethod
+    def _parseWaypointSeq(response):
+        """Extract the integer seq from a 'WAYPOINT_ACCEPTED seq=<n> ...' response, else None."""
+        match = re.search(r"seq=(\d+)", str(response))
+        return int(match.group(1)) if match else None
     
     def requestSendGoToWPwithPIDtuning(self, latitude, longitude, altitude, yaw, kp_pos, ki_pos, kd_pos, kp_yaw, ki_yaw, kd_yaw):
         """Navigate to a waypoint with custom PID tuning parameters."""
