@@ -317,7 +317,11 @@ class DJIInterface:
     def getDistanceToHome(self):
         """Get distance to home in meters."""
         return self.getTelemetry().get("distanceToHome", 0.0)
-    
+
+    def getLRFTarget(self):
+        """Get the last LRF-locked target position (latitude, longitude, altitude)."""
+        return self.getTelemetry().get("lrfTarget")
+
     def getWaypointSeq(self):
         """Id of the waypoint the streamed 'waypointReached' currently refers to.
 

@@ -343,6 +343,8 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
      */
     @Volatile private var cachedTelemetryJson: String = "{}"
 
+    @Volatile private var lrfTargetLocation: LocationCoordinate3D? = null
+
     private val productTypeKey: DJIKey<ProductType> = ProductKey.KeyProductType.create()
     private val flightControllerConnectionKey: DJIKey<Boolean> = FlightControllerKey.KeyConnection.create()
     private val cameraModeKey: DJIKey<CameraMode> = KeyTools.createKey(CameraKey.KeyCameraMode, ComponentIndexType.LEFT_OR_MAIN)
@@ -1917,7 +1919,7 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
             val phoneLocationJson = """{"latitude":$phoneLat,"longitude":$phoneLon,"heading":$phoneHeading,"pressure":$phonePressure,"battery":$phoneBattery,"wifiRssi":$wifiRssi}"""
             val webRtcJson = lastWebRTCMetrics.toTelemetryJson()
 
-            return """{"droneName":"$droneName","speed":${mock.velocity},"heading":${mock.heading},"attitude":${mock.attitude},"location":${mock.location},"phoneLocation":$phoneLocationJson,"webRtc":$webRtcJson,"gimbalAttitude":${mock.gimbalAttitude},"gimbalJointAttitude":${mock.gimbalAttitude},"zoomFl":24,"hybridFl":24,"opticalFl":24,"zoomRatio":1.0,"batteryLevel":${mock.batteryPercent},"satelliteCount":${mock.satelliteCount},"homeLocation":{"latitude":${mock.location.latitude},"longitude":${mock.location.longitude}},"distanceToHome":0.0,"waypointReached":false,"waypointSeq":0,"intermediaryWaypointReached":false,"yawReached":true,"yawSeq":0,"altitudeReached":true,"altitudeSeq":0,"isRecording":true,"homeSet":true,"remainingFlightTime":1320,"timeNeededToGoHome":45,"timeNeededToLand":18,"totalTime":63,"maxRadiusCanFlyAndGoHome":900,"remainingCharge":${mock.batteryPercent},"batteryNeededToLand":12,"batteryNeededToGoHome":18,"seriousLowBatteryThreshold":10,"lowBatteryThreshold":20,"flightMode":"${mock.flightMode}","isManualOverrideActive":false,"autoSensingActive":$isAutoSensingActive,"detectedTargets":${DetectedTarget.listToJsonArray(currentDetectedTargets)}}"""
+            return """{"droneName":"$droneName","speed":${mock.velocity},"heading":${mock.heading},"attitude":${mock.attitude},"location":${mock.location},"lrfTarget":${lrfTargetLocation?.toString() ?: "null"},"phoneLocation":$phoneLocationJson,"webRtc":$webRtcJson,"gimbalAttitude":${mock.gimbalAttitude},"gimbalJointAttitude":${mock.gimbalAttitude},"zoomFl":24,"hybridFl":24,"opticalFl":24,"zoomRatio":1.0,"batteryLevel":${mock.batteryPercent},"satelliteCount":${mock.satelliteCount},"homeLocation":{"latitude":${mock.location.latitude},"longitude":${mock.location.longitude}},"distanceToHome":0.0,"waypointReached":false,"waypointSeq":0,"intermediaryWaypointReached":false,"yawReached":true,"yawSeq":0,"altitudeReached":true,"altitudeSeq":0,"isRecording":true,"homeSet":true,"remainingFlightTime":1320,"timeNeededToGoHome":45,"timeNeededToLand":18,"totalTime":63,"maxRadiusCanFlyAndGoHome":900,"remainingCharge":${mock.batteryPercent},"batteryNeededToLand":12,"batteryNeededToGoHome":18,"seriousLowBatteryThreshold":10,"lowBatteryThreshold":20,"flightMode":"${mock.flightMode}","isManualOverrideActive":false,"autoSensingActive":$isAutoSensingActive,"detectedTargets":${DetectedTarget.listToJsonArray(currentDetectedTargets)}}"""
         }
 
         val goHomeInfo = goHomeAssessmentProcessor.value
@@ -1969,8 +1971,9 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
         
         val phoneLocationJson = """{"latitude":$phoneLat,"longitude":$phoneLon,"heading":$phoneHeading,"pressure":$phonePressure,"battery":$phoneBattery,"wifiRssi":$wifiRssi}"""
         val webRtcJson = lastWebRTCMetrics.toTelemetryJson()
+        val lrfTargetJson = lrfTargetLocation?.toString() ?: "null"
 
-        return """{"droneName":"$droneName","speed":$speed,"heading":$heading,"attitude":$attitude,"location":$location,"phoneLocation":$phoneLocationJson,"webRtc":$webRtcJson,"gimbalAttitude":$gimbalAttitude,"gimbalJointAttitude":$gimbalJointAttitude,"zoomFl":$zoomFl,"hybridFl":$hybridFl,"opticalFl":$opticalFl,"zoomRatio":$zoomRatio,"batteryLevel":$batteryLevel,"satelliteCount":$satelliteCount,"homeLocation":$homeLocation,"distanceToHome":$distanceToHome,"waypointReached":$waypointReached,"waypointSeq":$waypointSeq,"intermediaryWaypointReached":$intermediaryWaypointReached,"yawReached":$yawReached,"yawSeq":$yawSeq,"altitudeReached":$altitudeReached,"altitudeSeq":$altitudeSeq,"isRecording":$isRecording,"homeSet":$homeSet,"remainingFlightTime":$remainingFlightTime,"timeNeededToGoHome":$timeNeededToGoHome,"timeNeededToLand":$timeNeededToLand,"totalTime":$totalTime,"maxRadiusCanFlyAndGoHome":$maxRadiusCanFlyAndGoHome,"remainingCharge":$remainingCharge,"batteryNeededToLand":$batteryNeededToLand,"batteryNeededToGoHome":$batteryNeededToGoHome,"seriousLowBatteryThreshold":$seriousLowBatteryThreshold,"lowBatteryThreshold":$lowBatteryThreshold,"flightMode":"$flightMode","isManualOverrideActive":${DroneController.isManualOverrideActive},"autoSensingActive":$isAutoSensingActive,"detectedTargets":${DetectedTarget.listToJsonArray(currentDetectedTargets)}}"""
+        return """{"droneName":"$droneName","speed":$speed,"heading":$heading,"attitude":$attitude,"location":$location,"lrfTarget":$lrfTargetJson,"phoneLocation":$phoneLocationJson,"webRtc":$webRtcJson,"gimbalAttitude":$gimbalAttitude,"gimbalJointAttitude":$gimbalJointAttitude,"zoomFl":$zoomFl,"hybridFl":$hybridFl,"opticalFl":$opticalFl,"zoomRatio":$zoomRatio,"batteryLevel":$batteryLevel,"satelliteCount":$satelliteCount,"homeLocation":$homeLocation,"distanceToHome":$distanceToHome,"waypointReached":$waypointReached,"waypointSeq":$waypointSeq,"intermediaryWaypointReached":$intermediaryWaypointReached,"yawReached":$yawReached,"yawSeq":$yawSeq,"altitudeReached":$altitudeReached,"altitudeSeq":$altitudeSeq,"isRecording":$isRecording,"homeSet":$homeSet,"remainingFlightTime":$remainingFlightTime,"timeNeededToGoHome":$timeNeededToGoHome,"timeNeededToLand":$timeNeededToLand,"totalTime":$totalTime,"maxRadiusCanFlyAndGoHome":$maxRadiusCanFlyAndGoHome,"remainingCharge":$remainingCharge,"batteryNeededToLand":$batteryNeededToLand,"batteryNeededToGoHome":$batteryNeededToGoHome,"seriousLowBatteryThreshold":$seriousLowBatteryThreshold,"lowBatteryThreshold":$lowBatteryThreshold,"flightMode":"$flightMode","isManualOverrideActive":${DroneController.isManualOverrideActive},"autoSensingActive":$isAutoSensingActive,"detectedTargets":${DetectedTarget.listToJsonArray(currentDetectedTargets)}}"""
     }
 
     // ==================== HTTP Server ====================
@@ -2347,6 +2350,12 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
                         val target = if (locked) info?.location3D?.takeIf {
                             it.latitude != 0.0 || it.longitude != 0.0 || it.altitude != 0.0
                         } else null
+
+                        // Export to telemtry
+                        if (locked && target != null) {
+                            lrfTargetLocation = target
+                        }
+                        
                         val targetJson = if (target == null) "null"
                             else "[${target.latitude}, ${target.longitude}, ${target.altitude}]"
                         val stateJson = if (state == null) "null" else "\"$state\""
