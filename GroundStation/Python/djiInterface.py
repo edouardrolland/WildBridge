@@ -304,13 +304,38 @@ class DJIInterface:
         """Check if an intermediary waypoint has been reached."""
         return self.getTelemetry().get("intermediaryWaypointReached", False)
     
-    def isYawReached(self):
-        """Check if the target yaw has been reached."""
-        return self.getTelemetry().get("yawReached", False)
-    
-    def isAltitudeReached(self):
-        """Check if the target altitude has been reached."""
-        return self.getTelemetry().get("altitudeReached", False)
+    def getYawSeq(self):
+        """Id of the gotoYaw command the streamed 'yawReached' refers to (-1 if unknown)."""
+        return self.getTelemetry().get("yawSeq", -1)
+
+    def isYawReached(self, seq=None):
+        """Check if a commanded yaw has been reached.
+
+        'yawReached' latches until the next command, so pass the seq returned by
+        requestSendGotoYaw to require the streamed status belongs to that command.
+        seq=None keeps the legacy (race-prone) raw-flag read.
+        """
+        telemetry = self.getTelemetry()
+        reached = telemetry.get("yawReached", False)
+        if seq is None:
+            return reached
+        return reached and telemetry.get("yawSeq", -1) == seq
+
+    def getAltitudeSeq(self):
+        """Id of the gotoAltitude command the streamed 'altitudeReached' refers to (-1 if unknown)."""
+        return self.getTelemetry().get("altitudeSeq", -1)
+
+    def isAltitudeReached(self, seq=None):
+        """Check if a commanded altitude has been reached.
+
+        Pass the seq returned by requestSendGotoAltitude to avoid the stale-latch race.
+        seq=None keeps the legacy (race-prone) raw-flag read.
+        """
+        telemetry = self.getTelemetry()
+        reached = telemetry.get("altitudeReached", False)
+        if seq is None:
+            return reached
+        return reached and telemetry.get("altitudeSeq", -1) == seq
     
     def isCameraRecording(self):
         """Check if the camera is currently recording."""
@@ -452,11 +477,11 @@ class DJIInterface:
             None: if the command was rejected or the response had no seq.
         """
         response = self.requestSend(EP_GOTO_WP_PID, f"{latitude},{longitude},{altitude},{yaw},{speed}")
-        return self._parseWaypointSeq(response)
+        return self._parseSeq(response)
 
     @staticmethod
-    def _parseWaypointSeq(response):
-        """Extract the integer seq from a 'WAYPOINT_ACCEPTED seq=<n> ...' response, else None."""
+    def _parseSeq(response):
+        """Extract the integer seq from an '<X>_ACCEPTED seq=<n> ...' response, else None."""
         match = re.search(r"seq=(\d+)", str(response))
         return int(match.group(1)) if match else None
     
@@ -565,14 +590,20 @@ class DJIInterface:
         return self.requestSend(EP_ENABLE_VIRTUAL_STICK, "")
 
     def requestSendGotoYaw(self, yaw):
-        """Rotate to a specific yaw angle."""
+        """Rotate to a specific yaw angle.
+
+        Returns the int seq the app assigned (for isYawReached(seq)), or None if rejected.
+        """
         self.requestSendEnableVirtualStick()
-        return self.requestSend(EP_GOTO_YAW, f"{yaw}")
+        return self._parseSeq(self.requestSend(EP_GOTO_YAW, f"{yaw}"))
 
     def requestSendGotoAltitude(self, altitude):
-        """Navigate to a specific altitude."""
+        """Navigate to a specific altitude.
+
+        Returns the int seq the app assigned (for isAltitudeReached(seq)), or None if rejected.
+        """
         self.requestSendEnableVirtualStick()
-        return self.requestSend(EP_GOTO_ALTITUDE, f"{altitude}")
+        return self._parseSeq(self.requestSend(EP_GOTO_ALTITUDE, f"{altitude}"))
 
     def requestCameraStartRecording(self):
         """Start camera recording."""
