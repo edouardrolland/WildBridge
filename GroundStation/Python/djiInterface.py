@@ -521,16 +521,12 @@ class DJIInterface:
 
     def requestCapture(self):
         """Trigger ONE H20T shutter (no image download). Returns the capture descriptor.
-
-        A single shutter is atomic: it exposes thermal, wide (RGB) and zoom simultaneously,
-        so there is no lens to choose here. Pass the returned captureId to requestDownload()
-        to fetch whichever lens images you want.
-
         Returns:
             dict {"captureId": str, "thermal": fn|None, "wide": fn|None, "zoom": fn|None}
             on success (fn is the on-camera filename, None if that lens was not stored),
             else False.
         """
+        
         if self.IP_RC == "":
             print("No IP_RC provided, cannot capture image")
             return False
