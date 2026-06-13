@@ -9,10 +9,12 @@ import dji.sampleV5.aircraft.util.ToastUtils
 import dji.sdk.keyvalue.key.CameraKey
 import dji.sdk.keyvalue.key.DJIKey
 import dji.sdk.keyvalue.key.KeyTools
+import dji.sdk.keyvalue.value.camera.CameraType
 import dji.sdk.keyvalue.value.camera.GeneratedMediaFileInfo
 import dji.sdk.keyvalue.value.camera.LaserMeasureInformation
 import dji.sdk.keyvalue.value.camera.LaserMeasureState
 import dji.sdk.keyvalue.value.camera.LaserWorkMode
+import dji.sdk.keyvalue.value.camera.MediaFileType
 import dji.v5.common.callback.CommonCallbacks
 import dji.v5.common.error.IDJIError
 import dji.v5.et.create
@@ -30,7 +32,13 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
- * H20T payload control — Laser Range Finder (LRF) and thermal photo capture.
+ * Hybrid-payload control — Laser Range Finder (LRF) and multi-lens photo capture.
+ *
+ * Supports the Zenmuse H20T, H20N and H30T. All three are multi-lens hybrid payloads that
+ * write one JPEG per lens per shutter, tagged with a filename suffix (_T thermal, _W/_V wide,
+ * _Z zoom); the capture path classifies by that shared suffix scheme and ignores any extra
+ * lenses (H30T near-infrared, H20N second thermal) and non-image sidecars that don't map to
+ * the wide/zoom/thermal slots the bridge exposes.
  *
  * Singleton so the HTTP endpoints in WildBridgeDefaultLayoutActivity can fire payload
  * actions without holding payload-specific state in the activity. The blocking calls
@@ -129,9 +137,14 @@ object Payload {
 //                onFailure = { error -> Log.e(TAG, "LRF laser close failed: ${error.description()}") } )
         }
     }
-    // ==================== Thermal photo capture (H20T) ====================
+    // ==================== Multi-lens photo capture (H20T / H20N / H30T) ====================
 
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    // Identifies the attached payload so capture can adapt to it. LEFT_OR_MAIN component index,
+    // matching the mediaVM the host activity wires up. Null until the camera is connected.
+    private val cameraTypeKey: DJIKey<CameraType> = CameraKey.KeyCameraType.create()
+    private fun activeCameraType(): CameraType? = cameraTypeKey.get()
 
     // Fires when the camera writes a new photo to the SD card; carries the new file's index.
     private val keyNewlyGeneratedMediaFile = KeyTools.createKey(CameraKey.KeyNewlyGeneratedMediaFile)
@@ -156,15 +169,15 @@ object Payload {
         newMediaListenerRegistered = true
     }
 
-    // A single H20T shutter writes up to three co-aligned files to the SD card with the same
-    // timestamp and scene: a radiometric thermal R-JPEG, the wide visual (RGB) photo, and the
-    // zoom-lens photo. These are the hardware-synchronized counterparts to the thermal frame —
-    // strictly better aligned than tapping the (separately-pipelined) WHIP live stream. Each is
-    // null when the H20T is not configured to store that lens.
+    // A single shutter on the H20T/H20N/H30T writes co-aligned files to the SD card with the same
+    // timestamp and scene: a radiometric thermal R-JPEG, the wide visual photo, and the zoom-lens
+    // photo. These are the hardware-synchronized counterparts to the thermal frame — strictly
+    // better aligned than tapping the (separately-pipelined) WHIP live stream. Each is null when
+    // the payload is not configured to store that lens.
     data class ThermalCapture(val thermal: MediaFile?, val visual: MediaFile?, val zoom: MediaFile?)
 
-    // H20T per-lens filename suffixes (before the extension): _T = thermal R-JPEG,
-    // _W = wide / _V = visible RGB, _Z = zoom.
+    // Per-lens filename suffixes (before the extension), shared by the H20T/H20N/H30T:
+    // _T = thermal R-JPEG, _W = wide / _V = visible (RGB or starlight), _Z = zoom.
     private fun baseNameNoExt(name: String?): String =
         (name ?: "").substringBeforeLast('.').uppercase()
 
@@ -175,13 +188,20 @@ object Payload {
 
     private fun isZoomName(name: String?): Boolean = baseNameNoExt(name).endsWith("_Z")
 
+    // The co-exposed lens files of one shutter share a DCF base name and differ only by the lens
+    // suffix (e.g. DJI_20260613223116_0001_T / _W / _Z). Stripping that suffix groups the siblings
+    // together regardless of payload or how the camera encodes its file indices.
+    private val lensSuffixRegex = Regex("_[TWVZ]$")
+    private fun lensGroupBase(name: String?): String =
+        lensSuffixRegex.replace(baseNameNoExt(name), "")
+
     // Fire one shutter and return the thermal, wide-visual (RGB) and zoom MediaFiles from it.
     // Blocking, call from a worker thread.
     fun takeThermalAndVisual(mediaVM: MediaVM): ThermalCapture {
         val newFiles = captureNewMediaFiles(mediaVM)
         if (newFiles.isEmpty()) return ThermalCapture(null, null, null)
 
-        // The H20T may surface the lens images of one shot either as separate sibling entries
+        // The payload may surface the lens images of one shot either as separate sibling entries
         // or grouped under a parent MediaFile (subMediaFile). Flatten both so classification
         // sees every variant.
         val variants = LinkedHashMap<String, MediaFile>()
@@ -191,10 +211,18 @@ object Payload {
             file.subMediaFile?.forEach { sub -> sub?.fileName?.let { variants.putIfAbsent(it, sub) } }
         }
         newFiles.forEach { add(it) }
-        val all = variants.values.toList()
-        Log.i(TAG, "Lens files this shutter: ${all.map { "${it.fileName}#${it.fileIndex}(${it.fileSize}B)" }}")
 
-        // Thermal: the _T file by name; failing that the SMALLEST file (the radiometric R-JPEG is
+        // Keep only the actual lens stills. The H20N/H30T emit non-image artefacts per shutter
+        // (THM thumbnails, MET/LRF radiometric sidecars) the H20T did not; these are tiny and
+        // would otherwise hijack the smallest-file thermal fallback below. Fall back to every
+        // variant if type info is missing so we never end up with nothing to classify.
+        val imageTypes = setOf(MediaFileType.JPEG, MediaFileType.DNG, MediaFileType.TIFF)
+        val all = variants.values.filter { it.fileType in imageTypes }
+            .ifEmpty { variants.values.toList() }
+        Log.i(TAG, "Lens files this shutter (cam=${activeCameraType()}): " +
+            all.joinToString { "${it.fileName}#${it.fileIndex}(${it.fileSize}B)" })
+
+        // Thermal: the _T file by name; failing that the SMALLEST image (the radiometric R-JPEG is
         // far smaller than the full-res wide/zoom visuals), which is a much safer fallback than
         // blindly trusting the first-reported file.
         val thermal = all.firstOrNull { isThermalName(it.fileName) }
@@ -205,7 +233,7 @@ object Payload {
         val zoom = all.firstOrNull { isZoomName(it.fileName) && it.fileName != thermal.fileName }
 
         if (visual == null && zoom == null) {
-            Log.w(TAG, "No wide/zoom siblings found — H20T may be set to store infrared only")
+            Log.w(TAG, "No wide/zoom siblings found — payload may be set to store infrared only")
         } else {
             Log.i(TAG, "Paired thermal=${thermal.fileName} (${thermal.fileSize}B) " +
                 "visual=${visual?.fileName} (${visual?.fileSize}B) zoom=${zoom?.fileName} (${zoom?.fileSize}B)")
@@ -217,7 +245,7 @@ object Payload {
 
     // Fire one shutter (thermal + RGB + zoom, hardware-synchronized), remember the lens files
     // for later per-lens download, and return a JSON descriptor naming the captureId and which
-    // lenses the H20T actually stored (null where absent). Returns null if the shutter produced
+    // lenses the payload actually stored (null where absent). Returns null if the shutter produced
     // no thermal file. Blocking, call from a worker thread.
     fun captureThermal(mediaVM: MediaVM): String? {
         val capture = takeThermalAndVisual(mediaVM)
@@ -234,7 +262,7 @@ object Payload {
             "\"zoom\":${jsonName(capture.zoom?.fileName)}}"
     }
 
-    // Trip one shutter on the H20T and return ALL media files it produced (thermal R-JPEG plus,
+    // Trip one shutter on the payload and return ALL media files it produced (thermal R-JPEG plus,
     // when visible storage is enabled, the wide/zoom visual photo). Blocking, call from a worker
     // thread. mediaVM must be init'd with SD card storage and the LEFT_OR_MAIN component index
     // (done in the host activity's onCreate).
@@ -290,27 +318,45 @@ object Payload {
             }
             Log.i(TAG, "New photo index=$newIndex (baseline=$baselineIndex)")
 
-            // Pull a WINDOW around the new index, not a single entry: one H20T shutter writes
-            // several lens files (thermal + wide/zoom visual) at adjacent indices, and the
-            // "newly generated" key reports only one of them. A ±window pull surfaces them all.
-            val window = 6
-            val start = (newIndex - window).coerceAtLeast(0)
-            mainHandler.post { mediaVM.pullMediaFileListFromCamera(start, window * 2 + 1) }
+            // Pull the whole list, the way the DJI sample does (index -1, count -1). The earlier
+            // approach pulled a window anchored at (newIndex - 6), which only worked because the
+            // H20T hands out small sequential indices; the H20N/H30T encode the folder in the high
+            // bits (e.g. 262177 = folder 4), so a derived start offset is out of range and the
+            // fetch fails (MEDIA_MANAGER_FETCH_FILE_LIST_FAILED). The firmware request is always
+            // isAllList anyway, so there is nothing to gain from a narrower window.
+            mainHandler.post { mediaVM.pullMediaFileListFromCamera(-1, -1) }
 
             val listDeadline = System.currentTimeMillis() + 10000L
             while (System.currentTimeMillis() < listDeadline) {
                 val data = mediaVM.mediaFileListData.value?.data
-                if (data?.any { it.fileIndex == newIndex } == true) {
-                    // Files from THIS shutter are exactly those newer than the pre-shutter baseline
-                    // (captures are serial). With no baseline (first shot), fall back to the window.
-                    val newFiles = data.filter {
-                        if (baselineIndex != null) it.fileIndex > baselineIndex
-                        else it.fileIndex in (newIndex - window)..(newIndex + window)
-                    }
+                val anchor = data?.firstOrNull { it.fileIndex == newIndex }
+                if (anchor != null) {
+                    // This shutter's lens files, identified two independent ways and unioned:
+                    //   1. sharing the anchor's DCF base name (the co-exposed _T/_W/_Z siblings), and
+                    //   2. newer than the pre-shutter baseline (captures are serial).
+                    // Both are index-encoding agnostic, so this works across the H20T/H20N/H30T.
+                    val groupBase = lensGroupBase(anchor.fileName)
+                    val byBase = data.filter { lensGroupBase(it.fileName) == groupBase }
+                    val byBaseline = if (baselineIndex != null) data.filter { it.fileIndex > baselineIndex } else emptyList()
+                    val newFiles = (byBase + byBaseline).distinctBy { it.fileName }.ifEmpty { listOf(anchor) }
                     Log.i(TAG, "Resolved ${newFiles.size} new file(s): ${newFiles.map { "${it.fileName}#${it.fileIndex}" }}")
                     return newFiles
                 }
                 Thread.sleep(100)
+            }
+
+            // The fetch succeeded but no entry matched the newly-generated index — possible if a
+            // payload encodes the generated-media index differently from MediaFile.fileIndex.
+            // Rather than give up, resolve the newest file's lens group (fileIndex is monotonic,
+            // so the largest index is this shutter's). Empty only if the list itself is empty.
+            val data = mediaVM.mediaFileListData.value?.data
+            val newest = data?.maxByOrNull { it.fileIndex }
+            if (newest != null) {
+                val groupBase = lensGroupBase(newest.fileName)
+                val newFiles = data.filter { lensGroupBase(it.fileName) == groupBase }
+                Log.w(TAG, "Index $newIndex not in list; fell back to newest group ${newest.fileName}: " +
+                    newFiles.joinToString { "${it.fileName}#${it.fileIndex}" })
+                return newFiles
             }
             Log.e(TAG, "File list never surfaced index $newIndex")
             return emptyList()
