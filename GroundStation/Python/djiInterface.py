@@ -615,6 +615,7 @@ class DJIInterface:
         if not response:
             return {"distance": None, "target": None, "state": None}
         try:
+            print(response)
             return json.loads(response)
         except ValueError:
             print(f"LRF: could not parse response: {response!r}")

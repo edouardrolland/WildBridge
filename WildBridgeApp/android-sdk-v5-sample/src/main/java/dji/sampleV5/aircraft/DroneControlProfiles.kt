@@ -87,10 +87,7 @@ enum class DroneControlProfile(
         yawKp = 3.0,
         maxYawRateDegS = 30.0,
         defaultCruiseSpeedMps = 25.0,
-        // Same TH4 SkyPort payload as the M300 (on PORT_3 here). Release ALL hooks via the
-        // config-interface Unlock SWITCH (3) + All_Down BUTTON (5); main Down (1) drops only
-        // one and main All_Down (2) does nothing on this payload.
-        payloadIndexType = PayloadIndexType.PORT_3,
+        payloadIndexType = PayloadIndexType.PORT_1,
         dropArmSwitchIndex = 3,
         dropReleaseButtonIndex = 5
     ),

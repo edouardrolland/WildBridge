@@ -46,7 +46,7 @@ def main():
 
     # --- 1) TAKE: one shutter exposes all lenses simultaneously -------------------
     print("\nTaking the picture(s) — one shutter (no download yet)...")
-    
+    drone.requestLRFMeasure()
     info = drone.requestCapture()
     print(f"Capture info: {info}")
     capture_id = info["captureId"]
