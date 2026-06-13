@@ -45,6 +45,29 @@ object Payload {
     // ==================== Laser Range Finder (LRF) ====================
 
     private val laserKey: DJIKey<LaserWorkMode> = CameraKey.KeyLaserWorkMode.create()
+
+    // Master on/off for the rangefinder — the same toggle DJI Pilot 2 exposes. KeyLaserWorkMode
+    // only selects the firing mode (on-demand vs. always); measurement stays OFF (every
+    // LaserMeasureInformation field null) until this is set true. Enabling it here removes the need
+    // to flip the laser on manually in DJI Pilot 2.
+    private val laserEnabledKey: DJIKey<Boolean> = CameraKey.KeyLaserMeasureEnabled.create()
+
+    // Enable the rangefinder and set it to fire continuously. Idempotent; safe to call repeatedly.
+    private fun enableLaser() {
+        laserEnabledKey.set(
+            true,
+            onSuccess = { Log.i(TAG, "LRF measure enabled") },
+            onFailure = { error -> Log.e(TAG, "LRF measure enable failed: ${error.description()}") }
+        )
+        laserKey.set(
+            LaserWorkMode.OPEN_ALWAYS,
+            onSuccess = { Log.i(TAG, "LRF laser opened") },
+            onFailure = { error -> Log.e(TAG, "LRF laser open failed: ${error.description()}") }
+        )
+    }
+
+    init { enableLaser() }
+
     private val laserMeasureKey: DJIKey<LaserMeasureInformation> = CameraKey.KeyLaserMeasureInformation.create()
     private val lrfReadingLock = Any()
 
@@ -52,6 +75,7 @@ object Payload {
     private var lrfInfo: LaserMeasureInformation? = null
     @Volatile
     private var lrfListenerRegistered: Boolean = false
+
 
     // Register a persistent listener that caches the latest laser measurement. Idempotent.
     private fun setupLaserMeasureListener() {
@@ -71,11 +95,9 @@ object Payload {
         lrfInfo = null
 
         try {
-            laserKey.set(
-                LaserWorkMode.OPEN_ALWAYS,
-                onSuccess = { Log.i(TAG, "LRF laser opened") },
-                onFailure = { error -> Log.e(TAG, "LRF laser open failed: ${error.description()}") }
-            )
+            // Re-apply: the init-time enable runs before the SDK is connected and silently fails,
+            // so the first real reading must turn the laser on itself.
+            enableLaser()
 
             // Poll the key directly for fresh values; wait for the laser to lock (state == NORMAL)
             val deadline = System.currentTimeMillis() + timeoutMs
@@ -100,15 +122,13 @@ object Payload {
             }
             reading
         } finally {
-            // Return the laser to on-demand (closed)
-            laserKey.set(
-                LaserWorkMode.OPEN_ON_DEMAND,
-                onSuccess = { Log.i(TAG, "LRF laser set to OPEN_ON_DEMAND (off)") },
-                onFailure = { error -> Log.e(TAG, "LRF laser close failed: ${error.description()}") }
-            )
+//            // Return the laser to on-demand (closed)
+//            laserKey.set(
+//                LaserWorkMode.OPEN_ON_DEMAND,
+//                onSuccess = { Log.i(TAG, "LRF laser set to OPEN_ON_DEMAND (off)") },
+//                onFailure = { error -> Log.e(TAG, "LRF laser close failed: ${error.description()}") } )
         }
     }
-
     // ==================== Thermal photo capture (H20T) ====================
 
     private val mainHandler = Handler(Looper.getMainLooper())
