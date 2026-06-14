@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Manual timing test for the two-step capture API (requestCapture / requestDownload):
+Manual timing test for the two-step capture API (requestCapture / downloadByName):
 
     1. take 3 pictures            — requestCapture()  (one shutter, all lenses)
     2. take 2 pictures (zoom+ir)  — requestCapture()  (another shutter)
-    3. download each picture      — requestDownload() per lens, timed individually
+    3. download each picture      — downloadByName() per lens filename, timed individually
 
 A single H20T shutter is atomic: it exposes every lens at once, so "taking 3" and
 "taking 2" both cost one shutter — the two measurements let you compare them directly.
@@ -37,7 +37,7 @@ def main():
     capture_lenses = list(LENS_KEYS)
 
     # Trip the shutter once. requestCapture() returns the descriptor dict
-    # (containing the captureId) on success, or False on failure.
+    # (per-lens on-camera filenames) on success, or False on failure.
     print("Tripping shutter (requestCapture) ...")
     capture_info = drone.requestCapture()
     if not capture_info:
@@ -59,12 +59,15 @@ def main():
     print(f"Downloading {len(capture_lenses)} pictures to {download_dir} ...")
     failures = []
     for lens in capture_lenses:
-        # Pass the capture descriptor (captureId) so the bridge knows which
-        # shutter to pull from, the lens to fetch, and where to write it.
+        # Download this lens by its on-camera filename from the descriptor.
+        name = capture_info.get(lens)
+        if not name:
+            print(f"  {lens}: not stored this shutter, skipping")
+            continue
+        save_path = os.path.join(download_dir, f"{lens}.jpg")
         t0 = time.time()
-        result = drone.requestDownload(capture_info, lens, download_dir)
+        path = drone.downloadByName(name, save_path=save_path)
         dt = time.time() - t0
-        path = result.get(lens) if isinstance(result, dict) else None
         if path:
             print(f"  {lens}: downloaded in {dt:.1f}s -> {path}")
         else:

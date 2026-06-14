@@ -93,7 +93,8 @@ EP_SET_RTH_ALTITUDE = "/send/setRTHAltitude"
 EP_DEACTIVATE_MANUAL_OVERRIDE = "/send/deactivateManualOverride"
 EP_GET_MANUAL_OVERRIDE = "/get/isManualOverrideActive"
 EP_LRF_MEASURE = "/send/lrf/measure"
-EP_DOWNLOAD_CAPTURED_IMAGE = "/send/downloadCapturedImage"
+EP_LIST_MEDIA = "/send/listMedia"
+EP_DOWNLOAD_MEDIA_BY_NAME = "/send/downloadMediaByName"
 
 # The bridge identifies the three co-aligned lenses of one H20T shutter by these
 # exact names (no aliases). One shutter exposes all of them at once; the lens(es)
@@ -522,19 +523,22 @@ class DJIInterface:
     def requestCapture(self):
         """Trigger ONE H20T shutter (no image download). Returns the capture descriptor.
         Returns:
-            dict {"captureId": str, "thermal": fn|None, "wide": fn|None, "zoom": fn|None}
-            on success (fn is the on-camera filename, None if that lens was not stored),
-            else False.
+            dict {"thermal": fn|None, "wide": fn|None, "zoom": fn|None} on success (fn is the
+            on-camera filename, None if that lens was not stored), else False.
+
+        Download any returned filename with downloadByName().
         """
-        
+
         if self.IP_RC == "":
             print("No IP_RC provided, cannot capture image")
             return False
-        # Trip the shutter. The bridge returns a JSON descriptor naming the captureId
-        # and which lenses the H20T actually stored (no image yet).
+        # Trip the shutter. The bridge returns a JSON descriptor naming the on-camera filename
+        # of each lens the H20T stored (no image yet).
         try:
+            # Generous timeout: the very first capture after connect can be cold (the bridge builds
+            # the full SD-card list once), so allow well past the server's internal resolution cap.
             response = requests.post(
-                self.baseCommandUrl + EP_CAPTURE_THERMAL_IMAGE, data="", timeout=30)
+                self.baseCommandUrl + EP_CAPTURE_THERMAL_IMAGE, data="", timeout=60)
         except requests.exceptions.RequestException as e:
             print(f"Error capturing image: {e}")
             return False
@@ -544,69 +548,73 @@ class DJIInterface:
             print(f"Capture returned non-JSON: HTTP {response.status_code}, "
                   f"body={response.text[:200]!r}")
             return False
-        if info.get("error") or not info.get("captureId"):
+        if info.get("error") or not info.get("thermal"):
             print(f"Capture failed: {info}")
             return False
         return info
 
-    def requestDownload(self, capture_id, lenses=LENS_KEYS, out_dir=".", prefix=None):
-        """Download one or more lens images from a prior requestCapture().
-
-        Args:
-            capture_id: the "captureId" returned by requestCapture(), or the whole info
-                dict it returned (the captureId is extracted from it).
-            lenses: lens or lenses to download — "thermal", "wide", "zoom"; a single name,
-                a list/tuple, or a comma/space-separated string.
-            out_dir: directory to write the JPEGs into (created if missing).
-            prefix: optional filename prefix; files are "<prefix><lens>.jpg".
+    def listMedia(self):
+        """List every file on the camera's SD card (robust path — source of truth, not the
+        bounded recent-capture cache).
 
         Returns:
-            dict {lens: path|None} (None where that lens failed to download), or False on a
-            bad argument.
+            list of dicts {"name": str, "index": int, "size": int, "type": str} on success,
+            else False.
+        """
+        if self.IP_RC == "":
+            print("No IP_RC provided, cannot list media")
+            return False
+        try:
+            response = requests.post(
+                self.baseCommandUrl + EP_LIST_MEDIA, data="", timeout=30)
+        except requests.exceptions.RequestException as e:
+            print(f"Error listing media: {e}")
+            return False
+        try:
+            info = response.json()
+        except ValueError:
+            print(f"listMedia returned non-JSON: HTTP {response.status_code}, "
+                  f"body={response.text[:200]!r}")
+            return False
+        return info.get("files", [])
+
+    def downloadByName(self, file_name, save_path=None, out_dir="."):
+        """Download ANY file from the SD card by its on-camera filename. Works for any file the
+        camera ever wrote, regardless of how many captures happened since — no dependence on the
+        bounded recent-capture cache.
+
+        Args:
+            file_name: the on-camera filename (e.g. from listMedia() or a capture descriptor).
+            save_path: full output path; defaults to out_dir/file_name.
+            out_dir: directory used when save_path is not given (created if missing).
+
+        Returns:
+            the saved path, or None on failure.
         """
         if self.IP_RC == "":
             print("No IP_RC provided, cannot download image")
-            return False
-        # Accept either the captureId string or the whole info dict from requestCapture().
-        if isinstance(capture_id, dict):
-            capture_id = capture_id.get("captureId")
-        if not capture_id:
-            print("Download error: no captureId")
-            return False
-        try:
-            wanted = canonical_lenses(lenses)
-        except ValueError as e:
-            print(f"Download error: {e}")
-            return False
-        if not wanted:
-            print("No lenses selected.")
-            return False
-
-        os.makedirs(out_dir, exist_ok=True)
-        files = {}
-        for lens in wanted:
-            save_path = os.path.join(out_dir, f"{prefix or ''}{lens}.jpg")
-            files[lens] = self._downloadOneLens(capture_id, lens, save_path)
-        return files
-
-    def _downloadOneLens(self, capture_id, lens, save_path):
-        """Download a single lens of a capture to save_path. Returns the path, or None on
-        failure."""
+            return None
+        if not file_name:
+            print("Download error: no file_name")
+            return None
+        if save_path is None:
+            os.makedirs(out_dir, exist_ok=True)
+            save_path = os.path.join(out_dir, file_name)
         try:
             response = requests.post(
-                self.baseCommandUrl + EP_DOWNLOAD_CAPTURED_IMAGE,
-                data=f"{capture_id},{lens}", timeout=120)
+                self.baseCommandUrl + EP_DOWNLOAD_MEDIA_BY_NAME,
+                data=file_name, timeout=120)
         except requests.exceptions.RequestException as e:
-            print(f"{lens}: download error: {e}")
+            print(f"{file_name}: download error: {e}")
             return None
         content_type = response.headers.get("Content-Type", "")
         if response.status_code != 200 or not content_type.startswith("image/"):
-            print(f"{lens}: download failed (HTTP {response.status_code}, "
+            print(f"{file_name}: download failed (HTTP {response.status_code}, "
                   f"Content-Type={content_type!r}, body={response.text[:200]!r})")
             return None
         with open(save_path, "wb") as f:
             f.write(response.content)
-        print(f"{lens} image saved to: {save_path} ({len(response.content)} bytes)")
+        print(f"{file_name} saved to: {save_path} ({len(response.content)} bytes)")
         return save_path
 
     def requestLRFMeasure(self):

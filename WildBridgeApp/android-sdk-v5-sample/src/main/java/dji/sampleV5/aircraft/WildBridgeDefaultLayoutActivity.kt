@@ -384,7 +384,6 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
         // Initialize DroneController
         DroneController.init(basicAircraftControlVM, virtualStickVM)
 
-        // MediaVM drives H20T thermal photo capture (shoot to + pull from the camera SD card).
         mediaVM = ViewModelProvider(this)[MediaVM::class.java]
         mediaVM.init()
         mediaVM.setStorage(CameraStorageLocation.SDCARD)
@@ -578,6 +577,13 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
 
     private fun applyAircraftConnectionState(isConnected: Boolean) {
         aircraftConnected = isConnected
+        // Warm the media list on connect so the first photo capture isn't cold (the first
+        // whole-card fetch is slow and otherwise blows past the capture client's timeout).
+        if (isConnected) {
+            if (::mediaVM.isInitialized) Payload.warmUpMedia(mediaVM)
+        } else {
+            Payload.resetMediaWarmup()
+        }
         if (isConnected && sharedPreferences.getBoolean(PREF_MOCK_VIDEO_ENABLED, false)) {
             sharedPreferences.edit().putBoolean(PREF_MOCK_VIDEO_ENABLED, false).apply()
             webRTCStreamer?.setMockVideoEnabled(false)
@@ -2051,9 +2057,9 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
                     postData = String(buffer)
                 }
 
-                // Thermal capture is two-step. Capture only trips one shutter and returns a JSON
-                // descriptor (captureId + which lenses were stored); the lens files are held on
-                // the drone and downloaded individually via /send/downloadCapturedImage.
+                // Camera Capture is two-step. Capture only trips one shutter and returns a JSON
+                // descriptor naming the per-lens filenames the payload stored; the lens files stay
+                // on the SD card and are downloaded by name via /send/downloadMediaByName.
                 if (method == "POST" && uri == "/send/captureThermalImage") {
                     WildBridgeFlightLogger.logCommand(uri, postData)
                     val body: String = if (!ControlAuthority.authorizeControlCommand(source)) {
@@ -2073,17 +2079,35 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
                     return
                 }
 
-                // Download one lens from a prior capture: body is "captureId,lens". Returns binary
-                // image/jpeg written straight to the socket, bypassing the text-response path below.
-                if (method == "POST" && uri == "/send/downloadCapturedImage") {
+                // Download ANY file on the SD card by name: body is the filename. Resolves against
+                // the live media list (the card's own index). Returns binary image/jpeg written
+                // straight to the socket, bypassing the text-response path below.
+                if (method == "POST" && uri == "/send/downloadMediaByName") {
                     WildBridgeFlightLogger.logCommand(uri, postData)
                     val outputStream = clientSocket.getOutputStream()
-                    val args = postData.split(",")
-                    if (args.size < 2) {
-                        Payload.sendErrorResponse(outputStream, "Expected body 'captureId,lens'")
+                    val fileName = postData.trim()
+                    if (fileName.isEmpty()) {
+                        Payload.sendErrorResponse(outputStream, "Expected body '<fileName>'")
                     } else {
-                        Payload.sendCapturedImage(args[0].trim(), args[1].trim(), outputStream)
+                        Payload.sendMediaFileByName(mediaVM, fileName, outputStream)
                     }
+                    clientSocket.close()
+                    return
+                }
+
+                // List every file on the SD card as JSON so a client can browse and pick any to
+                // download via /send/downloadMediaByName.
+                if (method == "POST" && uri == "/send/listMedia") {
+                    WildBridgeFlightLogger.logCommand(uri, postData)
+                    val body: String = Payload.listAllMedia(mediaVM)
+                    val bodyBytes = body.toByteArray()
+                    writer.println("HTTP/1.1 200 OK")
+                    writer.println("Content-Type: application/json")
+                    writer.println("Content-Length: ${bodyBytes.size}")
+                    writer.println("Access-Control-Allow-Origin: *")
+                    writer.println()
+                    writer.print(body)
+                    writer.flush()
                     clientSocket.close()
                     return
                 }

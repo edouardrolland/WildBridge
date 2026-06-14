@@ -15,6 +15,7 @@ import dji.sdk.keyvalue.value.camera.LaserMeasureInformation
 import dji.sdk.keyvalue.value.camera.LaserMeasureState
 import dji.sdk.keyvalue.value.camera.LaserWorkMode
 import dji.sdk.keyvalue.value.camera.MediaFileType
+import dji.sdk.keyvalue.value.file.FileListRequestTimeOrderType
 import dji.v5.common.callback.CommonCallbacks
 import dji.v5.common.error.IDJIError
 import dji.v5.et.create
@@ -40,11 +41,6 @@ import java.util.concurrent.TimeUnit
  * lenses (H30T near-infrared, H20N second thermal) and non-image sidecars that don't map to
  * the wide/zoom/thermal slots the bridge exposes.
  *
- * Singleton so the HTTP endpoints in WildBridgeDefaultLayoutActivity can fire payload
- * actions without holding payload-specific state in the activity. The blocking calls
- * (takeFreshLrfReading, captureThermal, sendCapturedImage) are invoked from the HTTP
- * server's worker threads, and are expected to run one at a time — the command server
- * issues capture requests serially.
  */
 object Payload {
 
@@ -140,6 +136,14 @@ object Payload {
     // ==================== Multi-lens photo capture (H20T / H20N / H30T) ====================
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private const val MEDIA_PULL_TIMEOUT_MS = 6000L      // per single list refresh
+    private const val CAPTURE_OVERALL_TIMEOUT_MS = 30000L // whole capture resolution
+
+    private const val CAPTURE_PULL_COUNT = 16
+    private const val NARROW_PULL_FALLBACK_TRIES = 4
+
+    @Volatile
+    private var narrowPullSupported = true
 
     // Identifies the attached payload so capture can adapt to it. LEFT_OR_MAIN component index,
     // matching the mediaVM the host activity wires up. Null until the camera is connected.
@@ -153,14 +157,6 @@ object Payload {
     @Volatile
     private var newMediaListenerRegistered = false
 
-    // Lens files from each shutter, kept so they can be downloaded individually on a
-    // follow-up request. Keyed by the captureId handed back to the caller.
-    private val captures = java.util.concurrent.ConcurrentHashMap<String, ThermalCapture>()
-
-    // Persistent listener caching the most-recent generated-file info. Registered once
-    // (idempotent) and torn down via destroy(). A fresh listener per capture would replay the
-    // PREVIOUS photo's cached value on registration, which is what made repeated captures return
-    // the same stale file.
     private fun setupNewMediaListener() {
         if (newMediaListenerRegistered) return
         keyNewlyGeneratedMediaFile.listen(this) { newValue: GeneratedMediaFileInfo? ->
@@ -169,11 +165,32 @@ object Payload {
         newMediaListenerRegistered = true
     }
 
+    @Volatile
+    private var mediaWarmedUp = false
+
+    // Build the SD-card media list once, in the background, so the FIRST capture isn't cold.
+    fun warmUpMedia(mediaVM: MediaVM) {
+        if (mediaWarmedUp) return
+        mediaWarmedUp = true
+        Thread {
+            try {
+                setupNewMediaListener()
+                // Generous cap: the cold first fetch can take far longer than a warm refresh.
+                val files = mediaVM.pullAndAwait(CAPTURE_OVERALL_TIMEOUT_MS)
+                Log.i(TAG, "Media warm-up complete: ${files.size} file(s) on card")
+            } catch (e: Exception) {
+                Log.w(TAG, "Media warm-up failed (will retry): ${e.message}")
+                mediaWarmedUp = false
+            }
+        }.start()
+    }
+
+    // Allow the next connection to warm up again. Call when the aircraft disconnects.
+    fun resetMediaWarmup() { mediaWarmedUp = false }
+
     // A single shutter on the H20T/H20N/H30T writes co-aligned files to the SD card with the same
     // timestamp and scene: a radiometric thermal R-JPEG, the wide visual photo, and the zoom-lens
-    // photo. These are the hardware-synchronized counterparts to the thermal frame — strictly
-    // better aligned than tapping the (separately-pipelined) WHIP live stream. Each is null when
-    // the payload is not configured to store that lens.
+    // photo.
     data class ThermalCapture(val thermal: MediaFile?, val visual: MediaFile?, val zoom: MediaFile?)
 
     // Per-lens filename suffixes (before the extension), shared by the H20T/H20N/H30T:
@@ -190,20 +207,17 @@ object Payload {
 
     // The co-exposed lens files of one shutter share a DCF base name and differ only by the lens
     // suffix (e.g. DJI_20260613223116_0001_T / _W / _Z). Stripping that suffix groups the siblings
-    // together regardless of payload or how the camera encodes its file indices.
+
     private val lensSuffixRegex = Regex("_[TWVZ]$")
     private fun lensGroupBase(name: String?): String =
         lensSuffixRegex.replace(baseNameNoExt(name), "")
 
     // Fire one shutter and return the thermal, wide-visual (RGB) and zoom MediaFiles from it.
-    // Blocking, call from a worker thread.
-    fun takeThermalAndVisual(mediaVM: MediaVM): ThermalCapture {
+    // Internal helper for captureThermal. Blocking, call from a worker thread.
+    private fun takeThermalAndVisual(mediaVM: MediaVM): ThermalCapture {
         val newFiles = captureNewMediaFiles(mediaVM)
         if (newFiles.isEmpty()) return ThermalCapture(null, null, null)
 
-        // The payload may surface the lens images of one shot either as separate sibling entries
-        // or grouped under a parent MediaFile (subMediaFile). Flatten both so classification
-        // sees every variant.
         val variants = LinkedHashMap<String, MediaFile>()
         fun add(file: MediaFile?) {
             if (file?.fileName == null) return
@@ -212,10 +226,6 @@ object Payload {
         }
         newFiles.forEach { add(it) }
 
-        // Keep only the actual lens stills. The H20N/H30T emit non-image artefacts per shutter
-        // (THM thumbnails, MET/LRF radiometric sidecars) the H20T did not; these are tiny and
-        // would otherwise hijack the smallest-file thermal fallback below. Fall back to every
-        // variant if type info is missing so we never end up with nothing to classify.
         val imageTypes = setOf(MediaFileType.JPEG, MediaFileType.DNG, MediaFileType.TIFF)
         val all = variants.values.filter { it.fileType in imageTypes }
             .ifEmpty { variants.values.toList() }
@@ -243,37 +253,35 @@ object Payload {
 
     private fun jsonName(name: String?) = if (name == null) "null" else "\"$name\""
 
-    // Fire one shutter (thermal + RGB + zoom, hardware-synchronized), remember the lens files
-    // for later per-lens download, and return a JSON descriptor naming the captureId and which
-    // lenses the payload actually stored (null where absent). Returns null if the shutter produced
-    // no thermal file. Blocking, call from a worker thread.
+    // Returns null if the shutter produced no thermal file. Blocking, call from a worker thread.
     fun captureThermal(mediaVM: MediaVM): String? {
         val capture = takeThermalAndVisual(mediaVM)
         if (capture.thermal == null) return null
-        val captureId = System.currentTimeMillis().toString()
-        captures[captureId] = capture
-        // Bound memory: keep only the most recent few captures.
-        if (captures.size > 8) {
-            captures.keys.sorted().take(captures.size - 8).forEach { captures.remove(it) }
-        }
-        return "{\"captureId\":\"$captureId\"," +
-            "\"thermal\":${jsonName(capture.thermal.fileName)}," +
+        return "{\"thermal\":${jsonName(capture.thermal.fileName)}," +
             "\"wide\":${jsonName(capture.visual?.fileName)}," +
             "\"zoom\":${jsonName(capture.zoom?.fileName)}}"
     }
-
     // Trip one shutter on the payload and return ALL media files it produced (thermal R-JPEG plus,
     // when visible storage is enabled, the wide/zoom visual photo). Blocking, call from a worker
-    // thread. mediaVM must be init'd with SD card storage and the LEFT_OR_MAIN component index
+    // thread. mediaVM must be init with SD card storage and the LEFT_OR_MAIN component index
     // (done in the host activity's onCreate).
     private fun captureNewMediaFiles(mediaVM: MediaVM): List<MediaFile> {
         try {
             setupNewMediaListener()
 
-            // Remember the current newest-photo index (from the key cache or the last
-            // listener push) so the shot we are about to take can be told apart from it.
-            val baselineIndex = (keyNewlyGeneratedMediaFile.get() ?: latestGeneratedMediaInfo)?.index
+            // Pre-shutter baseline = the highest fileIndex already on the card. We take the MAX of
+            // two independent sources so a lagging signal can never set it too low under rapid fire:
+            //   - the KeyNewlyGeneratedMediaFile event (camera's own newest-file index), and
+            //   - the current media-list snapshot's max index.
+            // Any file the upcoming shot writes will have fileIndex > this baseline. Relying on the
+            // key ALONE was the bug: back-to-back captures outran its push, so the old code either
+            // timed out waiting for a "new index" or locked onto a stale one. fileIndex is monotonic
+            // (incl. the H20N/H30T folder-encoded high bits), so a list-max baseline is reliable.
+            val keyBaseline = (keyNewlyGeneratedMediaFile.get() ?: latestGeneratedMediaInfo)?.index
+            val listBaseline = mediaVM.mediaFileListData.value?.data?.maxOfOrNull { it.fileIndex }
+            val baselineIndex = listOfNotNull(keyBaseline, listBaseline).maxOrNull()
             latestGeneratedMediaInfo = null
+            Log.i(TAG, "Pre-shutter baseline index=$baselineIndex (key=$keyBaseline, list=$listBaseline)")
 
             // Trip the shutter on the main thread and wait for the SDK callback.
             var photoError: String? = null
@@ -296,40 +304,43 @@ object Payload {
             }
             if (photoError != null) return emptyList()
 
-            // Wait for a new index to appear from either the listener push or the key cache
-            var newIndex: Int? = null
-            val idxDeadline = System.currentTimeMillis() + 8000L
-            while (System.currentTimeMillis() < idxDeadline) {
-                // Accept a fresh index from EITHER the listener push or the key cache,
-                // whichever first reports something different from the baseline
-                val cur = listOfNotNull(
-                    latestGeneratedMediaInfo?.index,
-                    keyNewlyGeneratedMediaFile.get()?.index
-                ).firstOrNull { it != baselineIndex }
-                if (cur != null) {
-                    newIndex = cur
-                    break
+            // Find this shot's files in the media list (the card's own index — source of truth).
+            // Event-driven, no fixed cadence: each pullAndAwait blocks until the camera reports the
+            // refresh done, then we inspect. Two ways to finish, fastest-first:
+            //   1. COMPLETE — all three exposed lenses (thermal + wide + zoom) have landed. Nothing
+            //      more can arrive for this shot, so return at once (the common case; no confirm pull).
+            //   2. QUIESCENT — for payloads/configs that store fewer lenses, the complete set never
+            //      appears, so fall back to "file set unchanged across two refreshes, thermal present."
+            // There is no key-gated "wait for a new index" phase (the event lags under rapid fire) and
+            // no fixed settle delay; the only time bounds are safety caps against a stalled link.
+            var bestGroup: List<MediaFile> = emptyList()
+            var prevGroupNames: Set<String> = emptySet()
+            val overallDeadline = System.currentTimeMillis() + CAPTURE_OVERALL_TIMEOUT_MS
+
+            var emptyNarrowPulls = 0
+
+            while (System.currentTimeMillis() < overallDeadline) {
+                val narrow = narrowPullSupported
+                val data = if (narrow)
+                    mediaVM.pullAndAwait(MEDIA_PULL_TIMEOUT_MS, CAPTURE_PULL_COUNT, FileListRequestTimeOrderType.NEW_FIRST)
+                else
+                    mediaVM.pullAndAwait(MEDIA_PULL_TIMEOUT_MS)
+
+                val anchor = data.filter { baselineIndex == null || it.fileIndex > baselineIndex }
+                    .maxByOrNull { it.fileIndex }
+
+                // Detect a firmware that ignores NEW_FIRST: a FULL newest-window whose max index is
+                // strictly BELOW the baseline can only be the oldest files (wrong order). A shot that
+                // simply hasn't landed yet leaves max == baseline, so this never misfires on a slow
+                // write. After a few such pulls, drop to full pulls for the rest of the session.
+                if (narrow && baselineIndex != null && data.size >= CAPTURE_PULL_COUNT &&
+                    (data.maxOfOrNull { it.fileIndex } ?: Int.MAX_VALUE) < baselineIndex) {
+                    if (++emptyNarrowPulls >= NARROW_PULL_FALLBACK_TRIES) {
+                        narrowPullSupported = false
+                        Log.w(TAG, "Narrow pull returned only files older than baseline $baselineIndex " +
+                            "($emptyNarrowPulls times); firmware ignores NEW_FIRST — using full pulls for the session")
+                    }
                 }
-                Thread.sleep(100)
-            }
-            if (newIndex == null) {
-                Log.e(TAG, "No new media index after shutter (baseline=$baselineIndex)")
-                return emptyList()
-            }
-            Log.i(TAG, "New photo index=$newIndex (baseline=$baselineIndex)")
-
-            // Pull the whole list, the way the DJI sample does (index -1, count -1). The earlier
-            // approach pulled a window anchored at (newIndex - 6), which only worked because the
-            // H20T hands out small sequential indices; the H20N/H30T encode the folder in the high
-            // bits (e.g. 262177 = folder 4), so a derived start offset is out of range and the
-            // fetch fails (MEDIA_MANAGER_FETCH_FILE_LIST_FAILED). The firmware request is always
-            // isAllList anyway, so there is nothing to gain from a narrower window.
-            mainHandler.post { mediaVM.pullMediaFileListFromCamera(-1, -1) }
-
-            val listDeadline = System.currentTimeMillis() + 10000L
-            while (System.currentTimeMillis() < listDeadline) {
-                val data = mediaVM.mediaFileListData.value?.data
-                val anchor = data?.firstOrNull { it.fileIndex == newIndex }
                 if (anchor != null) {
                     // This shutter's lens files, identified two independent ways and unioned:
                     //   1. sharing the anchor's DCF base name (the co-exposed _T/_W/_Z siblings), and
@@ -338,35 +349,40 @@ object Payload {
                     val groupBase = lensGroupBase(anchor.fileName)
                     val byBase = data.filter { lensGroupBase(it.fileName) == groupBase }
                     val byBaseline = if (baselineIndex != null) data.filter { it.fileIndex > baselineIndex } else emptyList()
-                    val newFiles = (byBase + byBaseline).distinctBy { it.fileName }.ifEmpty { listOf(anchor) }
-                    Log.i(TAG, "Resolved ${newFiles.size} new file(s): ${newFiles.map { "${it.fileName}#${it.fileIndex}" }}")
-                    return newFiles
+                    val group = (byBase + byBaseline).distinctBy { it.fileName }.ifEmpty { listOf(anchor) }
+
+                    if (group.size > bestGroup.size) bestGroup = group
+                    val names = bestGroup.map { it.fileName }.toSet()
+                    val hasThermal = bestGroup.any { isThermalName(it.fileName) }
+
+                    // (1) Complete: all three exposed lenses present — return immediately, no extra pull.
+                    val complete = hasThermal &&
+                        bestGroup.any { isWideName(it.fileName) } &&
+                        bestGroup.any { isZoomName(it.fileName) }
+                    // (2) Quiescent: this refresh added nothing new to the group, thermal present.
+                    if (complete || (hasThermal && names == prevGroupNames)) {
+                        Log.i(TAG, "Resolved ${bestGroup.size} file(s) above baseline $baselineIndex " +
+                            "(${if (complete) "complete" else "settled"}): " +
+                            bestGroup.joinToString { "${it.fileName}#${it.fileIndex}" })
+                        return bestGroup
+                    }
+                    prevGroupNames = names
                 }
-                Thread.sleep(100)
             }
 
-            // The fetch succeeded but no entry matched the newly-generated index — possible if a
-            // payload encodes the generated-media index differently from MediaFile.fileIndex.
-            // Rather than give up, resolve the newest file's lens group (fileIndex is monotonic,
-            // so the largest index is this shutter's). Empty only if the list itself is empty.
-            val data = mediaVM.mediaFileListData.value?.data
-            val newest = data?.maxByOrNull { it.fileIndex }
-            if (newest != null) {
-                val groupBase = lensGroupBase(newest.fileName)
-                val newFiles = data.filter { lensGroupBase(it.fileName) == groupBase }
-                Log.w(TAG, "Index $newIndex not in list; fell back to newest group ${newest.fileName}: " +
-                    newFiles.joinToString { "${it.fileName}#${it.fileIndex}" })
-                return newFiles
+            // Hit the safety cap before the group settled. Return the best (largest) group seen so the
+            // caller still gets whatever lenses did surface; empty only if nothing ever matched.
+            if (bestGroup.isNotEmpty()) {
+                Log.w(TAG, "Group above baseline $baselineIndex did not settle with thermal; returning " +
+                    "best-effort ${bestGroup.size} file(s): " + bestGroup.joinToString { "${it.fileName}#${it.fileIndex}" })
+                return bestGroup
             }
-            Log.e(TAG, "File list never surfaced index $newIndex")
+            Log.e(TAG, "No new files surfaced above baseline $baselineIndex after shutter")
             return emptyList()
         } catch (e: Exception) {
             Log.e(TAG, "Error taking thermal image: ${e.message}", e)
             return emptyList()
         }
-        // Note: takePhoto switches the camera to PHOTO_NORMAL and we intentionally leave it
-        // there. Restoring VIDEO_NORMAL after each shot made the controller visibly flip out
-        // of image-capture mode ("blinking") between captures.
     }
 
     // Download a MediaFile from the camera straight into memory (no disk round-trip) and return
@@ -412,31 +428,97 @@ object Payload {
         return bytes
     }
 
-    // Look up a previously-captured lens file (by captureId) and stream it back as a single
-    // image/jpeg HTTP response. [lens] is "thermal", "wide" or "zoom". Writes an error
-    // response if the captureId is unknown, the requested lens wasn't stored for that shutter, or
-    // the download fails. Blocking, call from a worker thread.
-    fun sendCapturedImage(captureId: String, lens: String, outputStream: OutputStream) {
-        val capture = captures[captureId]
-        if (capture == null) {
-            sendErrorResponse(outputStream, "Unknown captureId: $captureId")
-            return
+    // ==================== SD-card media access (robust, source-of-truth path) ====================
+    //
+    // Downloads resolve by FILENAME against the camera's own media list (mediaVM.mediaFileListData),
+    // the real index of everything on the card. captureThermal returns the per-lens filenames; the
+    // client downloads any of them — or any other file on the card — by name. There is no server-side
+    // capture cache to bound, so every photo ever taken stays reachable even under long bursts of
+    // consecutive captures.
+
+    // Resolve a MediaFile by its filename from the live media list. Searches top-level entries and
+    // their subMediaFile variants. The cached snapshot can lag a just-taken shot, so if the name is
+    // absent we refresh (event-driven, blocking on each pull's completion) and retry until the
+    // overall safety cap. Returns null if it never surfaces.
+    private fun findMediaFile(mediaVM: MediaVM, fileName: String): MediaFile? {
+        setupNewMediaListener()
+        fun search(data: List<MediaFile>?): MediaFile? {
+            data ?: return null
+            for (f in data) {
+                if (f.fileName == fileName) return f
+                f.subMediaFile?.forEach { sub -> if (sub?.fileName == fileName) return sub }
+            }
+            return null
         }
-        val mediaFile = when (lens.lowercase()) {
-            "thermal" -> capture.thermal
-            "wide" -> capture.visual
-            "zoom" -> capture.zoom
-            else -> null
+        // Cheap path: maybe it's already in the cached snapshot.
+        search(mediaVM.mediaFileListData.value?.data)?.let { return it }
+        val deadline = System.currentTimeMillis() + CAPTURE_OVERALL_TIMEOUT_MS
+        while (System.currentTimeMillis() < deadline) {
+            search(mediaVM.pullAndAwait(MEDIA_PULL_TIMEOUT_MS))?.let { return it }
         }
-        if (mediaFile == null) {
-            sendErrorResponse(outputStream, "Lens '$lens' not available for capture $captureId")
-            return
+        return null
+    }
+
+    // Flatten a media-list snapshot into a name-keyed map: top-level entries plus their
+    // subMediaFile variants, deduped by filename so every downloadable file appears once.
+    private fun flattenMedia(data: List<MediaFile>?): LinkedHashMap<String, MediaFile> {
+        val files = LinkedHashMap<String, MediaFile>()
+        data?.forEach { f ->
+            f.fileName?.let { files.putIfAbsent(it, f) }
+            f.subMediaFile?.forEach { sub -> sub?.fileName?.let { files.putIfAbsent(it, sub) } }
+        }
+        return files
+    }
+
+    // Pull the full SD-card file list and return it as a JSON array describing every file, so a
+    // client can browse and download ANY picture by name (not only the handful from recent
+    // shutters). Blocking, call from a worker thread.
+    //
+    // mediaFileListData refreshes ONLY when a pull completes; the SDK never rescans the card on its
+    // own. The cached snapshot is therefore usually stale, so we refresh (event-driven — each
+    // pullAndAwait blocks on the SDK completion signal) until the file count is QUIESCENT, i.e. it
+    // holds steady across two consecutive refreshes, meaning no more files are arriving.
+    fun listAllMedia(mediaVM: MediaVM): String {
+        setupNewMediaListener()
+
+        val deadline = System.currentTimeMillis() + CAPTURE_OVERALL_TIMEOUT_MS
+        var files = flattenMedia(mediaVM.mediaFileListData.value?.data)
+        while (System.currentTimeMillis() < deadline) {
+            val next = flattenMedia(mediaVM.pullAndAwait(MEDIA_PULL_TIMEOUT_MS))
+            // Quiescent: count held steady across this refresh and we have at least one file.
+            if (next.size == files.size && next.isNotEmpty()) {
+                files = next
+                break
+            }
+            files = next
         }
 
+        val items = files.values.joinToString(",") { f ->
+            "{\"name\":${jsonName(f.fileName)},\"index\":${f.fileIndex}," +
+                "\"size\":${f.fileSize},\"type\":${jsonName(f.fileType?.name)}}"
+        }
+        Log.i(TAG, "Listed ${files.size} media file(s) on SD card")
+        return "{\"count\":${files.size},\"files\":[$items]}"
+    }
+
+    // Resolve a file by name from the live SD-card list and stream it back as image/jpeg. Works for
+    // any file on the card. Blocking, call from a worker thread.
+    fun sendMediaFileByName(mediaVM: MediaVM, fileName: String, outputStream: OutputStream) {
+        val mediaFile = findMediaFile(mediaVM, fileName)
+        if (mediaFile == null) {
+            sendErrorResponse(outputStream, "File not found on SD card: $fileName")
+            return
+        }
+        streamMediaFile(mediaFile, fileName, outputStream)
+    }
+
+    // Download a MediaFile and write it back over the socket as an image/jpeg response, or an error
+    // response on failure.
+    private fun streamMediaFile(mediaFile: MediaFile, label: String, outputStream: OutputStream) {
         try {
             val bytes = downloadToBytes(mediaFile)
             if (bytes == null) {
-                sendErrorResponse(outputStream, "Failed to download $lens image")
+                sendErrorResponse(outputStream, "Failed to download $label")
                 return
             }
             val headers = StringBuilder().apply {
@@ -451,14 +533,14 @@ object Payload {
             outputStream.write(bytes)
             outputStream.flush()
 
-            Log.i(TAG, "Sent $lens image ${mediaFile.fileName} (${bytes.size} bytes)")
+            Log.i(TAG, "Sent ${mediaFile.fileName} (${bytes.size} bytes)")
             mainHandler.post {
-                ToastUtils.showToast("Sent $lens image (${bytes.size / 1024} KB)")
+                ToastUtils.showToast("Sent ${mediaFile.fileName} (${bytes.size / 1024} KB)")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error sending $lens image: ${e.message}", e)
+            Log.e(TAG, "Error sending ${mediaFile.fileName}: ${e.message}", e)
             try {
-                sendErrorResponse(outputStream, "Error sending $lens image: ${e.message}")
+                sendErrorResponse(outputStream, "Error sending $label: ${e.message}")
             } catch (responseError: Exception) {
                 Log.e(TAG, "Failed to send error response: ${responseError.message}")
             }
@@ -548,6 +630,7 @@ object Payload {
         lrfInfo = null
         newMediaListenerRegistered = false
         latestGeneratedMediaInfo = null
+        mediaWarmedUp = false
         dropListenerIndex = null
     }
 }

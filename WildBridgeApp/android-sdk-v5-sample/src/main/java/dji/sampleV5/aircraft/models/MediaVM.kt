@@ -21,6 +21,7 @@ import dji.v5.utils.common.LogUtils
 import dji.sampleV5.aircraft.util.ToastUtils
 import dji.sdk.keyvalue.value.camera.CameraStorageLocation
 import dji.sdk.keyvalue.value.common.EmptyMsg
+import dji.sdk.keyvalue.value.file.FileListRequestTimeOrderType
 import dji.v5.common.error.DJICommonError
 import dji.v5.utils.common.ContextUtil
 import dji.v5.utils.common.DiskUtil
@@ -30,6 +31,8 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.util.ArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * @author feel.feng
@@ -83,6 +86,50 @@ class MediaVM : DJIViewModel() {
                     LogUtils.e(logTag, "fetch failed$error")
                 }
             })
+    }
+
+    // Pull the file list and BLOCK until the camera signals the refresh is done — either the
+    // MediaFileListState reaches UP_TO_DATE or the pull's own completion callback fires, whichever
+    // comes first. Returns the fresh list straight from the media manager. Event-driven: the wait
+    // ends on the SDK's completion signal, not a fixed delay. [timeoutMs] is only a safety cap so a
+    // stalled link can't block the worker forever. Call from a worker thread.
+    //
+    // [count] caps how many files to fetch (-1 = the whole card); pair with [orderType] = NEW_FIRST
+    // to fetch only the newest few, which is far cheaper than the whole list once the card is full.
+    // Order/list contents never affect this app's correctness (callers filter by fileIndex), so the
+    // defaults reproduce the original full-list pull.
+    fun pullAndAwait(
+        timeoutMs: Long,
+        count: Int = -1,
+        orderType: FileListRequestTimeOrderType? = null
+    ): List<MediaFile> {
+        val manager = MediaDataCenter.getInstance().mediaManager
+        val latch = CountDownLatch(1)
+        val stateListener = MediaFileListStateListener { state ->
+            if (state == MediaFileListState.UP_TO_DATE) latch.countDown()
+        }
+        manager.addMediaFileListStateListener(stateListener)
+        try {
+            // Issue the pull on the main looper (matches how the rest of the app drives the SDK),
+            // then block the calling worker on the latch.
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                val builder = PullMediaFileListParam.Builder().mediaFileIndex(-1).count(count)
+                if (orderType != null) builder.orderType(orderType)
+                manager.pullMediaFileListFromCamera(
+                    builder.build(),
+                    object : CommonCallbacks.CompletionCallback {
+                        override fun onSuccess() { latch.countDown() }
+                        override fun onFailure(error: IDJIError) { latch.countDown() }
+                    }
+                )
+            }
+            latch.await(timeoutMs, TimeUnit.MILLISECONDS)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+        } finally {
+            manager.removeMediaFileListStateListener(stateListener)
+        }
+        return manager.mediaFileListData?.data ?: emptyList()
     }
 
     private fun addMediaFileListStateListener() {
