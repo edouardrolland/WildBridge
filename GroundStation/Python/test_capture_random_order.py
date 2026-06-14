@@ -76,7 +76,6 @@ def main():
         print("\nNo files captured; aborting.")
         return 1
 
-    # Filenames must be unique across the whole run (a stale repeat means a capture bug).
     names = [name for _, _, name in jobs]
     dupes = {n for n in names if names.count(n) > 1}
     if dupes:
