@@ -2,8 +2,12 @@ package dji.sampleV5.aircraft.webrtc
 
 import android.util.Log
 import dji.sdk.keyvalue.key.BatteryKey
+import dji.sdk.keyvalue.key.CameraKey
 import dji.sdk.keyvalue.key.FlightControllerKey
 import dji.sdk.keyvalue.key.GimbalKey
+import dji.sdk.keyvalue.key.KeyTools
+import dji.sdk.keyvalue.value.camera.CameraVideoStreamSourceType
+import dji.sdk.keyvalue.value.common.ComponentIndexType
 import dji.sdk.keyvalue.value.flightcontroller.FlightMode
 import dji.sdk.keyvalue.value.common.Attitude
 import dji.sdk.keyvalue.value.common.LocationCoordinate3D
@@ -39,6 +43,7 @@ object TelemetryProvider {
     private val batteryPercentKey = BatteryKey.KeyChargeRemainingInPercent.create()
     private val isFlyingKey = FlightControllerKey.KeyIsFlying.create()
     private val flightModeStringKey = FlightControllerKey.KeyFlightModeString.create()
+    private val cameraVideoStreamSourceKey = KeyTools.createKey(CameraKey.KeyCameraVideoStreamSource, ComponentIndexType.LEFT_OR_MAIN)
 
     // ---- Cached values updated asynchronously by KeyManager listeners ----
     @Volatile private var cachedLocation = LocationCoordinate3D(0.0, 0.0, 0.0)
@@ -51,6 +56,7 @@ object TelemetryProvider {
     @Volatile private var cachedBatteryPercent = 0
     @Volatile private var cachedIsFlying = false
     @Volatile private var cachedFlightMode = "UNKNOWN"
+    @Volatile private var cachedCameraStreamSource = "UNKNOWN"
     @Volatile private var mockTelemetryEnabled = false
     @Volatile private var mockBaseLatitude = 55.6761
     @Volatile private var mockBaseLongitude = 12.5683
@@ -99,6 +105,9 @@ object TelemetryProvider {
         }
         km.listen(flightModeStringKey, this) { _, v ->
             v?.let { cachedFlightMode = it }
+        }
+        km.listen(cameraVideoStreamSourceKey, this) { _, v ->
+            cachedCameraStreamSource = v?.name ?: "UNKNOWN"
         }
     }
 
@@ -223,7 +232,8 @@ object TelemetryProvider {
                 isFlying = mock.isFlying,
                 flightMode = mock.flightMode,
                 isManualOverrideActive = false,
-                detectedTargets = currentDetectedTargets
+                detectedTargets = currentDetectedTargets,
+                cameraStreamSource = cachedCameraStreamSource
             )
         }
 
@@ -267,7 +277,8 @@ object TelemetryProvider {
             isFlying = cachedIsFlying,
             flightMode = cachedFlightMode,
             isManualOverrideActive = DroneController.isManualOverrideActive,
-            detectedTargets = currentDetectedTargets
+            detectedTargets = currentDetectedTargets,
+            cameraStreamSource = cachedCameraStreamSource
         )
     }
 }

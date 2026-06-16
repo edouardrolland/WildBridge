@@ -48,7 +48,8 @@ data class FrameMetadata(
     val isFlying: Boolean,
     val flightMode: String,          // DJI flight mode string (e.g. "GPS", "ATTI", "SPORT", "TRIPOD")
     val isManualOverrideActive: Boolean = false,  // True when pilot has taken manual RC control
-    val detectedTargets: List<DetectedTarget> = emptyList()  // AI-detected targets from AutoSensing
+    val detectedTargets: List<DetectedTarget> = emptyList(),  // AI-detected targets from AutoSensing
+    val cameraStreamSource: String = "UNKNOWN"
 ) {
     /**
      * Convert to JSON for transmission via WebRTC data channel
@@ -91,6 +92,7 @@ data class FrameMetadata(
             put("flightMode", flightMode)
             put("isManualOverrideActive", isManualOverrideActive)
             put("detectedTargets", JSONArray(detectedTargets.map { it.toJson() }))
+            put("cameraStreamSource", cameraStreamSource)
         }
     }
     
@@ -130,7 +132,8 @@ data class FrameMetadata(
                 isFlying = obj.optBoolean("isFlying", false),
                 flightMode = obj.optString("flightMode", "UNKNOWN"),
                 isManualOverrideActive = obj.optBoolean("isManualOverrideActive", false),
-                detectedTargets = DetectedTarget.fromJsonArray(obj.optJSONArray("detectedTargets") ?: JSONArray())
+                detectedTargets = DetectedTarget.fromJsonArray(obj.optJSONArray("detectedTargets") ?: JSONArray()),
+                cameraStreamSource = obj.optString("cameraStreamSource", "UNKNOWN")
             )
         }
     }
