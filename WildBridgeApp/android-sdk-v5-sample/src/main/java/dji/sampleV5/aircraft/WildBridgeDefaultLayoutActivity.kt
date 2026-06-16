@@ -2202,6 +2202,30 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
                         DroneController.setStick(lx, ly, rx, ry)
                         "Received: leftX: $lx, leftY: $ly, rightX: $rx, rightY: $ry"
                     }
+                    "/send/gimbal/rel_pitch" -> {
+                        val cmd = postData.split(",")
+                        val roll = cmd[0].toDouble()
+                        val pitch = cmd[1].toDouble()
+                        val yaw = cmd[2].toDouble()
+                        val rot = GimbalAngleRotation(
+                            GimbalAngleRotationMode.RELATIVE_ANGLE,
+                            pitch, 0.0, 0.0, false, true, false, 0.1, false, 0
+                        )
+                        gimbalKey.action(rot)
+                        "Received: relative pitch: $pitch"
+                    }
+                    "/send/gimbal/rel_yaw" -> {
+                        val cmd = postData.split(",")
+                        val roll = cmd[0].toDouble()
+                        val pitch = cmd[1].toDouble()
+                        val yaw = cmd[2].toDouble()
+                        val rot = GimbalAngleRotation(
+                            GimbalAngleRotationMode.RELATIVE_ANGLE,
+                            0.0, 0.0, yaw, true, true, false, 0.1, false, 0
+                        )
+                        gimbalKey.action(rot)
+                        "Received: relative yaw: $yaw"
+                    }
                     "/send/gimbal/pitch" -> {
                         val cmd = postData.split(",")
                         val roll = cmd[0].toDouble()

@@ -75,6 +75,8 @@ EP_STICK = "/send/stick"  # expects a formatted string: "<leftX>,<leftY>,<rightX
 EP_ZOOM = "/send/camera/zoom"
 EP_GIMBAL_SET_PITCH = "/send/gimbal/pitch"
 EP_GIMBAL_SET_YAW = "/send/gimbal/yaw"  # !!! This is the yaw joint angle !!!
+EP_GIMBAL_SET_REL_PITCH = "/send/gimbal/rel_pitch"
+EP_GIMBAL_SET_REL_YAW = "/send/gimbal/rel_yaw"
 EP_TAKEOFF = "/send/takeoff"
 EP_LAND = "/send/land"
 EP_RTH = "/send/RTH"
@@ -464,6 +466,14 @@ class DJIInterface:
         """Set gimbal yaw angle."""
         return self.requestSend(EP_GIMBAL_SET_YAW, f"0,0,{yaw}")
 
+    def requestSendGimbalRelPitch(self, rel_pitch=0):
+        """Adjust gimbal pitch by a relative angle."""
+        return self.requestSend(EP_GIMBAL_SET_REL_PITCH, f"0,{rel_pitch},0")
+    
+    def requestSendGimbalRelYaw(self, rel_yaw=0):
+        """Adjust gimbal yaw by a relative angle."""
+        return self.requestSend(EP_GIMBAL_SET_REL_YAW, f"0,0,{rel_yaw}")
+    
     def requestSendZoomRatio(self, zoomRatio=1):
         """Set camera zoom ratio."""
         return self.requestSend(EP_ZOOM, zoomRatio)
