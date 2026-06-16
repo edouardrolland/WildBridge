@@ -97,6 +97,8 @@ EP_GET_MANUAL_OVERRIDE = "/get/isManualOverrideActive"
 EP_LRF_MEASURE = "/send/lrf/measure"
 EP_LIST_MEDIA = "/send/listMedia"
 EP_DOWNLOAD_MEDIA_BY_NAME = "/send/downloadMediaByName"
+EP_CAMERA_STREAM_SOURCE = "/send/camera/streamSource"
+EP_GET_CAMERA_STREAM_SOURCE = "/get/camera/streamSource"
 
 # The bridge identifies the three co-aligned lenses of one H20T shutter by these
 # exact names (no aliases). One shutter exposes all of them at once; the lens(es)
@@ -424,11 +426,15 @@ class DJIInterface:
 
     def isManualOverrideActive(self):
         """Check if manual override is active (pilot took RC control).
-        
+
         When True, autonomous HTTP commands are being rejected by the app.
         The pilot must deactivate manual override before autonomous commands work again.
         """
         return self.getTelemetry().get("isManualOverrideActive", False)
+
+    def getCameraStreamSource(self):
+        """Get the active camera stream source from telemetry (e.g. 'WIDE_CAMERA', 'INFRARED_CAMERA')."""
+        return self.getTelemetry().get("cameraStreamSource", "UNKNOWN")
 
     # ==================== Commands (HTTP POST on port 8080) ====================
 
@@ -727,12 +733,51 @@ class DJIInterface:
 
     def requestDeactivateManualOverride(self):
         """Deactivate manual override latch so autonomous commands are accepted again.
-        
+
         This should be called after the pilot has finished manual control
         and wants to allow autonomous commands to work again.
         """
         return self.requestSend(EP_DEACTIVATE_MANUAL_OVERRIDE, "")
-    
+
+    def requestSetCameraStreamSource(self, source):
+        """Switch the camera video stream source (lens).
+
+        Args:
+            source: one of 'WIDE_CAMERA', 'ZOOM_CAMERA', 'INFRARED_CAMERA',
+                    'RGB_CAMERA', etc.  Case-insensitive.
+
+        Returns:
+            str: server response confirming or rejecting the switch.
+        """
+        return self.requestSend(EP_CAMERA_STREAM_SOURCE, source.strip().upper())
+
+    def requestGetCameraStreamSourceInfo(self):
+        """Query the current camera stream source and available sources.
+
+        Returns:
+            dict: {"current": str, "available": list[str]} on success, else {}.
+        """
+        response = self.requestSend(EP_GET_CAMERA_STREAM_SOURCE, "")
+        if not response:
+            return {}
+        try:
+            return json.loads(response)
+        except ValueError:
+            print(f"streamSource: could not parse response: {response!r}")
+            return {}
+
+    def requestSetThermalStream(self):
+        """Convenience: switch to infrared/thermal camera stream."""
+        return self.requestSetCameraStreamSource("INFRARED_CAMERA")
+
+    def requestSetWideStream(self):
+        """Convenience: switch to wide-angle RGB camera stream."""
+        return self.requestSetCameraStreamSource("WIDE_CAMERA")
+
+    def requestSetZoomStream(self):
+        """Convenience: switch to zoom camera stream."""
+        return self.requestSetCameraStreamSource("ZOOM_CAMERA")
+
     def requestSticks(self):
         """Deprecated: RC stick values are now available via getTelemetry()."""
         print("Warning: requestSticks() is deprecated. Use getTelemetry() instead.")
