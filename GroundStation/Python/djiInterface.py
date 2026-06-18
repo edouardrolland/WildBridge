@@ -82,6 +82,7 @@ EP_LAND = "/send/land"
 EP_RTH = "/send/RTH"
 EP_ENABLE_VIRTUAL_STICK = "/send/enableVirtualStick"
 EP_ABORT_MISSION = "/send/abortMission"
+EP_ABORT_ALL = "/send/abortAll"
 EP_GOTO_WP = "/send/gotoWP"
 EP_GOTO_YAW = "/send/gotoYaw"
 EP_GOTO_WP_PID = "/send/gotoWPwithPID"
@@ -125,10 +126,8 @@ def canonical_lenses(lenses):
 
 # PID Tuning
 EP_TUNING = "/send/gotoWPwithPIDtuning"
+EP_GOTO_WP_PID_PRECISE = "/send/gotoWPwithPIDprecise"
 EP_PAYLOAD_DROP = "/send/drop"
-
-#PID Tuninng
-EP_TUNING = "/send/gotoWPwithPIDtuning"
 
 # Thermal Image handling
 SAVE_SUCCESS = "T_IMG_SAVE_SUCCESS"
@@ -501,7 +500,7 @@ class DJIInterface:
         """Navigate to a waypoint."""
         return self.requestSend(EP_GOTO_WP, f"{latitude},{longitude},{altitude}")
 
-    def requestSendGoToWPwithPID(self, latitude, longitude, altitude, yaw, speed: float = 5.0):
+    def requestSendGoToWPwithPID(self, latitude, longitude, altitude, yaw, speed: float = 20.0):
         """Navigate to a waypoint with PID control.
 
         Args:
@@ -529,6 +528,24 @@ class DJIInterface:
     def requestSendGoToWPwithPIDtuning(self, latitude, longitude, altitude, yaw, kp_pos, ki_pos, kd_pos, kp_yaw, ki_yaw, kd_yaw):
         """Navigate to a waypoint with custom PID tuning parameters."""
         return self.requestSend(EP_TUNING, f"{latitude},{longitude},{altitude},{yaw},{kp_pos},{ki_pos},{kd_pos},{kp_yaw},{ki_yaw},{kd_yaw}")
+
+    def requestSendGoToWPwithPIDprecise(self, latitude, longitude, altitude, yaw, max_speed):
+        """Navigate to a waypoint with the two-phase yaw-then-translate controller.
+
+        Phase 1 rotates the drone in place to the target yaw; phase 2 flies to the waypoint.
+        All PID gains and the max horizontal accel come from the active aircraft profile (same
+        params as requestSendGoToWPwithPID).
+
+        Args:
+            latitude, longitude, altitude: Target position
+            yaw: Target yaw angle
+            max_speed: Max speed in m/s
+
+        Returns:
+            int: the seq id parsed from "WAYPOINT_ACCEPTED seq=<n> ...", or None if rejected.
+        """
+        response = self.requestSend(EP_GOTO_WP_PID_PRECISE, f"{latitude},{longitude},{altitude},{yaw},{max_speed}")
+        return self._parseSeq(response)
 
     def requestCapture(self):
         """Trigger ONE H20T shutter (no image download). Returns the capture descriptor.
@@ -693,6 +710,15 @@ class DJIInterface:
         """Abort the current mission and disable virtual stick."""
         return self.requestSend(EP_ABORT_MISSION, "")
 
+    def requestAbortAll(self):
+        """Cancel any active PID control loop (controlLoopEnabled=false, activeLoopIsWaypoint=false).
+
+        Use before a tuning command to guarantee a COLD start so new distanceKp/maxHorizontalAccel
+        are re-captured — without this, a running loop would just hot-swap the target and keep the
+        gains it already has.
+        """
+        return self.requestSend(EP_ABORT_ALL, "")
+
     def requestSendEnableVirtualStick(self):
         """Enable virtual stick control mode."""
         return self.requestSend(EP_ENABLE_VIRTUAL_STICK, "")
@@ -849,6 +875,9 @@ class DJIInterfaceLite:
     def requestSendGoToWPwithPIDtuning(self, latitude, longitude, altitude, yaw, kp_pos, ki_pos, kd_pos, kp_yaw, ki_yaw, kd_yaw):
         return self.requestSend(EP_TUNING, f"{latitude},{longitude},{altitude},{yaw},{kp_pos},{ki_pos},{kd_pos},{kp_yaw},{ki_yaw},{kd_yaw}")
 
+    def requestSendGoToWPwithPIDXPRIZETuning(self, latitude, longitude, altitude, yaw, max_speed):
+        return self.requestSend(EP_TUNING_XPRIZE, f"{latitude},{longitude},{altitude},{yaw},{max_speed}")
+
     def requestSendNavigateTrajectory(self, waypoints, finalYaw):
         """
         :param waypoints: A list of triples (latitude, longitude, altitude) for each waypoint.
@@ -940,6 +969,9 @@ class DJIInterfaceLite:
     def requestAbortMission(self):
         return self.requestSend(EP_ABORT_MISSION, "")
 
+    def requestAbortAll(self):
+        return self.requestSend(EP_ABORT_ALL, "")
+
     def requestWaypointStatus(self):
         return self.requestGet(EP_WP_REACHED)
 
@@ -983,7 +1015,7 @@ if __name__ == '__main__':
     import time
     import sys
     
-    IP_RC = "172.20.10.12"  # REPLACE WITH YOUR RC IP
+    IP_RC = "172.18.64.187"  # REPLACE WITH YOUR RC IP
     
     if len(sys.argv) > 1:
         IP_RC = sys.argv[1]
@@ -1008,36 +1040,9 @@ if __name__ == '__main__':
             
             if telemetry:
                 # Clear screen effect by printing separator
-                print("-" * 60)
-                print(f"[{telemetry.get('timestamp', 'N/A')}]")
-                print(f"  Battery:     {dji.getBatteryLevel()}%")
-                print(f"  Satellites:  {dji.getSatelliteCount()}")
-                print(f"  Heading:     {dji.getHeading():.1f}°")
-                print(f"  Location:    {dji.getLocation()}")
-                print(f"  Altitude:    {dji.getLocation().get('altitude', 'N/A')} m")
+                print("\033[2J\033[H")
                 print(f"  Speed:       {dji.getSpeed()}")
-                print(f"  Attitude:    {dji.getAttitude()}")
-                print(f"  Gimbal:      {dji.getGimbalAttitude()}")
-                print(f"  Home Set:    {dji.isHomeSet()}")
-                print(f"  Home Loc:    {dji.getHomeLocation()}")
-                print(f"  Dist Home:   {dji.getDistanceToHome():.1f} m")
-                print(f"  Recording:   {dji.isCameraRecording()}")
-                print(f"  WP Reached:  {dji.isWaypointReached()}")
-                print(f"  Yaw Reached: {dji.isYawReached()}")
-                print(f"  Alt Reached: {dji.isAltitudeReached()}")
-                print(f"  Flight Time: {dji.getRemainingFlightTime()} s remaining")
-                print(f"  Total Time:  {dji.getTotalTime()} s")
-                print(f"  Time to RTH: {dji.getTimeNeededToGoHome()} s")
-                print(f"  Time to Land:{dji.getTimeNeededToLand()} s")
-                print(f"  Max Radius:  {dji.getMaxRadiusCanFlyAndGoHome()} m")
-                print(f"  --- Battery Thresholds ---")
-                print(f"  Remaining:   {dji.getRemainingCharge()}%")
-                print(f"  Need Land:   {dji.getBatteryNeededToLand()}%")
-                print(f"  Need RTH:    {dji.getBatteryNeededToGoHome()}%")
-                print(f"  Low Batt:    {dji.getLowBatteryThreshold()}%")
-                print(f"  Serious Low: {dji.getSeriousLowBatteryThreshold()}%")
-                print(f"  Flight Mode: {dji.getFlightMode()}")
-                print(f"  Manual Override: {dji.isManualOverrideActive()}")
+               
             else:
                 print("Waiting for telemetry data...")
             

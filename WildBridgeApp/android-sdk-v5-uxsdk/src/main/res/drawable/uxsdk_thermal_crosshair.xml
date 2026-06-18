@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Sniper-style reticle marking the centre of the thermal camera frame. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="96dp"
+    android:height="96dp"
+    android:viewportWidth="100"
+    android:viewportHeight="100">
+
+    <!-- Crosshair arms (gap left around the centre) -->
+    <path
+        android:strokeColor="#FFE53935"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M50,6 V34 M50,66 V94 M6,50 H34 M66,50 H94" />
+
+    <!-- Outer ring -->
+    <path
+        android:strokeColor="#FFE53935"
+        android:strokeWidth="2.5"
+        android:fillColor="#00000000"
+        android:pathData="M50,22 a28,28 0 1 0 0.1,0 z" />
+
+    <!-- Centre dot -->
+    <path
+        android:fillColor="#FFE53935"
+        android:pathData="M50,47 a3,3 0 1 0 0.1,0 z" />
+</vector>

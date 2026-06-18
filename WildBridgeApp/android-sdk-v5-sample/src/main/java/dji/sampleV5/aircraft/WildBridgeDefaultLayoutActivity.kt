@@ -2307,7 +2307,7 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
                         DroneController.gotoWP(latitude, longitude, altitude)
                         "Waypoint command received: Latitude=$latitude, Longitude=$longitude, Altitude=$altitude"
                     }
-                    "/send/gotoWPwithPID" -> {
+                    "/send/gotoWPwithPIDprecise" -> {
                         if (DroneController.shouldRejectAutonomousCommand("gotoWPwithPID")) {
                             return "REJECTED: Manual override active. Deactivate manual override first."
                         }
@@ -2318,9 +2318,21 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
                         val altitude = cmd[2].toDouble()
                         val yaw = cmd[3].toDouble()
                         val maxSpeed = cmd[4].toDouble()
+                        val seq = DroneController.navigateToWaypointWithPIDprecise(latitude, longitude, altitude, yaw, maxSpeed)
+                        "WAYPOINT_ACCEPTED seq=$seq Latitude=$latitude, Longitude=$longitude, Altitude=$altitude, Yaw=$yaw, MaxSpeed=$maxSpeed"
+                    }
+                    "/send/gotoWPwithPID" -> {
+                        if (DroneController.shouldRejectAutonomousCommand("gotoWPwithPIDXPRIZETuning")) {
+                            return "REJECTED: Manual override active. Deactivate manual override first."
+                        }
+                        val cmd = postData.split(",")
+                        if (cmd.size < 5) return "Invalid input. Expected format: lat,lon,alt,yaw,maxSpeed"
+                        val latitude = cmd[0].toDouble()
+                        val longitude = cmd[1].toDouble()
+                        val altitude = cmd[2].toDouble()
+                        val yaw = cmd[3].toDouble()
+                        val maxSpeed = cmd[4].toDouble()
                         val seq = DroneController.navigateToWaypointWithPID(latitude, longitude, altitude, yaw, maxSpeed)
-                        // seq=<n> lets the caller match the streamed telemetry "waypointSeq"/"waypointReached"
-                        // to THIS command, instead of a stale latched value from the previous waypoint.
                         "WAYPOINT_ACCEPTED seq=$seq Latitude=$latitude, Longitude=$longitude, Altitude=$altitude, Yaw=$yaw, MaxSpeed=$maxSpeed"
                     }
                     "/send/navigateTrajectory" -> {

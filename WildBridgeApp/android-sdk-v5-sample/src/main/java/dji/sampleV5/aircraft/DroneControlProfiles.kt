@@ -10,7 +10,6 @@ enum class DroneControlProfile(
     val displayName: String,
     val maxHorizontalSpeedMps: Double,
     val maxHorizontalAccelMps2: Double,
-    val maxGotoWpSpeedMps: Double,
     val distanceKp: Double,
     // Integral gain for the distance controller. Held at 0: the distance error is
     // sign-definite (always >= 0), so an integral term can only wind up and never
@@ -32,9 +31,8 @@ enum class DroneControlProfile(
 ) {
     MAVIC_3_ENTERPRISE(
         displayName = "Mavic 3 Enterprise",
-        maxHorizontalSpeedMps = 25.0,
-        maxHorizontalAccelMps2 = 0.5,
-        maxGotoWpSpeedMps = 25.0,
+        maxHorizontalSpeedMps = 20.0,
+        maxHorizontalAccelMps2 = 1.0,
         distanceKp = 0.65,
         distanceKi = 0.0,
         distanceKd = 0.001,
@@ -45,9 +43,8 @@ enum class DroneControlProfile(
     ),
     MATRICE_300_RTK(
         displayName = "Matrice 300 RTK",
-        maxHorizontalSpeedMps = 25.0,
-        maxHorizontalAccelMps2 = 0.5,
-        maxGotoWpSpeedMps = 25.0,
+        maxHorizontalSpeedMps = 20.0,
+        maxHorizontalAccelMps2 = 1.0,
         distanceKp = 0.35,
         distanceKi = 0.0,
         distanceKd = 0.001,
@@ -62,9 +59,8 @@ enum class DroneControlProfile(
     ),
     MATRICE_350_RTK(
         displayName = "Matrice 350 RTK",
-        maxHorizontalSpeedMps = 25.0,
-        maxHorizontalAccelMps2 = 0.5,
-        maxGotoWpSpeedMps = 25.0,
+        maxHorizontalSpeedMps = 20.0,
+        maxHorizontalAccelMps2 = 1.0,
         distanceKp = 0.35,
         distanceKi = 0.0,
         distanceKd = 0.001,
@@ -79,8 +75,7 @@ enum class DroneControlProfile(
     MATRICE_400(
         displayName = "Matrice 400",
         maxHorizontalSpeedMps = 25.0,
-        maxHorizontalAccelMps2 = 0.5,
-        maxGotoWpSpeedMps = 25.0,
+        maxHorizontalAccelMps2 = 1.0,
         distanceKp = 0.35,
         distanceKi = 0.0,
         distanceKd = 0.001,
@@ -94,8 +89,7 @@ enum class DroneControlProfile(
     MINI_4_PRO(
         displayName = "DJI Mini 4 Pro",
         maxHorizontalSpeedMps = 15.0,
-        maxHorizontalAccelMps2 = 0.5,
-        maxGotoWpSpeedMps = 5.0,
+        maxHorizontalAccelMps2 = 1.0,
         distanceKp = 0.65,
         distanceKi = 0.0,
         distanceKd = 0.001,
