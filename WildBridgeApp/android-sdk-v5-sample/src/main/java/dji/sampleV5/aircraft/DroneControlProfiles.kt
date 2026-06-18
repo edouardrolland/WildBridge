@@ -82,7 +82,7 @@ enum class DroneControlProfile(
         yawKp = 3.0,
         maxYawRateDegS = 30.0,
         defaultCruiseSpeedMps = 25.0,
-        payloadIndexType = PayloadIndexType.PORT_1,
+        payloadIndexType = PayloadIndexType.PORT_3,
         dropArmSwitchIndex = 3,
         dropReleaseButtonIndex = 5
     ),
