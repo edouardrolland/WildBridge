@@ -949,7 +949,15 @@ class DJIInterface:
     def getSatelliteCount(self):
         """Get GPS satellite count."""
         return self.getTelemetry().get("satelliteCount", -1)
-    
+
+    def isReadyToTakeoff(self):
+        """Whether the drone is ready to take off / arm (derived on the aircraft side)."""
+        return self.getTelemetry().get("readyToTakeoff", False)
+
+    def getTakeoffBlockReason(self):
+        """Reason the drone cannot take off: FCMotorStartFailureError name, 'NONE', or 'UNKNOWN'."""
+        return self.getTelemetry().get("takeoffBlockReason", "UNKNOWN")
+
     def getHomeLocation(self):
         """Get home location (latitude, longitude)."""
         return self.getTelemetry().get("homeLocation", {})

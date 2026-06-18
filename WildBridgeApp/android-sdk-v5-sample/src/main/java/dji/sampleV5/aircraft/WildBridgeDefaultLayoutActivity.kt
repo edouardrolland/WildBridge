@@ -74,6 +74,8 @@ import dji.sdk.keyvalue.value.camera.CameraStorageLocation
 import dji.sdk.keyvalue.value.camera.SDCardLoadState
 import dji.sdk.keyvalue.value.camera.LaserMeasureState
 import dji.sdk.keyvalue.value.flightcontroller.FlightMode
+import dji.sdk.keyvalue.value.flightcontroller.FCMotorStartFailureError
+import dji.sdk.keyvalue.value.flightcontroller.GPSSignalLevel
 import dji.sdk.keyvalue.value.flightcontroller.LowBatteryRTHInfo
 import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotation
 import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotationMode
@@ -335,6 +337,12 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
     private val batteryKey: DJIKey<Int> = BatteryKey.KeyChargeRemainingInPercent.create()
     private val flightModeKey: DJIKey<FlightMode> = FlightControllerKey.KeyFlightMode.create()
     private val isFlyingKey: DJIKey<Boolean> = FlightControllerKey.KeyIsFlying.create()
+    private val areMotorsOnKey: DJIKey<Boolean> = FlightControllerKey.KeyAreMotorsOn.create()
+    private val gpsSignalLevelKey: DJIKey<GPSSignalLevel> = FlightControllerKey.KeyGPSSignalLevel.create()
+    // Tier-1 enrich keys: present in SDK jar but absent from public API docs.
+    // May return null on some aircraft/firmware -> treated as "not blocking".
+    private val notAllowMotorStartKey: DJIKey<Boolean> = FlightControllerKey.KeyNotAllowMotorStart.create()
+    private val takeoffFailureErrorKey: DJIKey<FCMotorStartFailureError> = FlightControllerKey.KeyTakeoffFailureError.create()
 
     /**
      * Pre-built telemetry JSON string, refreshed via KeyManager listeners whenever
@@ -1886,6 +1894,34 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
     private fun getCameraHybridFocalLength(): Int = cameraHybridFocalLengthKey.get(-1)
     private fun getBatteryLevel(): Int = batteryKey.get(-1)
     private fun getFlightMode(): FlightMode = flightModeKey.get(FlightMode.UNKNOWN)
+
+    /**
+     * Whether the aircraft is ready to take off / arm.
+     *
+     * No single SDK key reports this, so it is derived:
+     *  - Foundation (documented keys): connected, not flying, motors off, GPS level >= 3.
+     *  - Enrich (Tier-1, undocumented keys): NotAllowMotorStart false and TakeoffFailureError == NONE.
+     *    These may be null on some aircraft; null is treated as non-blocking.
+     */
+    private fun isReadyToTakeoff(): Boolean {
+        val connected = flightControllerConnectionKey.get(false)
+        val flying = isFlyingKey.get(false)
+        val motorsOn = areMotorsOnKey.get(false)
+        val gpsLevel = gpsSignalLevelKey.get(GPSSignalLevel.UNKNOWN)
+        val notAllowMotorStart: Boolean? = notAllowMotorStartKey.get()
+        val takeoffFailure: FCMotorStartFailureError? = takeoffFailureErrorKey.get()
+
+        return connected &&
+                !flying &&
+                !motorsOn &&
+                gpsLevel.value() >= GPSSignalLevel.LEVEL_3.value() &&
+                notAllowMotorStart != true &&
+                (takeoffFailure == null || takeoffFailure == FCMotorStartFailureError.NONE)
+    }
+
+    /** Reason the aircraft cannot take off, or "NONE". "UNKNOWN" when the key is unsupported. */
+    private fun getTakeoffBlockReason(): String =
+        takeoffFailureErrorKey.get()?.name ?: "UNKNOWN"
     private fun getTimeNeededToGoHome(): Int = goHomeAssessmentProcessor.value.timeNeededToGoHome
     private fun getTimeNeededToLand(): Int = timeNeededToLandProcessor.value
 
@@ -1925,7 +1961,7 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
             val phoneLocationJson = """{"latitude":$phoneLat,"longitude":$phoneLon,"heading":$phoneHeading,"pressure":$phonePressure,"battery":$phoneBattery,"wifiRssi":$wifiRssi}"""
             val webRtcJson = lastWebRTCMetrics.toTelemetryJson()
 
-            return """{"droneName":"$droneName","speed":${mock.velocity},"heading":${mock.heading},"attitude":${mock.attitude},"location":${mock.location},"lrfTarget":${lrfTargetLocation?.toString() ?: "null"},"phoneLocation":$phoneLocationJson,"webRtc":$webRtcJson,"gimbalAttitude":${mock.gimbalAttitude},"gimbalJointAttitude":${mock.gimbalAttitude},"zoomFl":24,"hybridFl":24,"opticalFl":24,"zoomRatio":1.0,"batteryLevel":${mock.batteryPercent},"satelliteCount":${mock.satelliteCount},"homeLocation":{"latitude":${mock.location.latitude},"longitude":${mock.location.longitude}},"distanceToHome":0.0,"waypointReached":false,"waypointSeq":0,"intermediaryWaypointReached":false,"yawReached":true,"yawSeq":0,"altitudeReached":true,"altitudeSeq":0,"isRecording":true,"homeSet":true,"remainingFlightTime":1320,"timeNeededToGoHome":45,"timeNeededToLand":18,"totalTime":63,"maxRadiusCanFlyAndGoHome":900,"remainingCharge":${mock.batteryPercent},"batteryNeededToLand":12,"batteryNeededToGoHome":18,"seriousLowBatteryThreshold":10,"lowBatteryThreshold":20,"flightMode":"${mock.flightMode}","isManualOverrideActive":false,"autoSensingActive":$isAutoSensingActive,"detectedTargets":${DetectedTarget.listToJsonArray(currentDetectedTargets)}}"""
+            return """{"droneName":"$droneName","speed":${mock.velocity},"heading":${mock.heading},"attitude":${mock.attitude},"location":${mock.location},"lrfTarget":${lrfTargetLocation?.toString() ?: "null"},"phoneLocation":$phoneLocationJson,"webRtc":$webRtcJson,"gimbalAttitude":${mock.gimbalAttitude},"gimbalJointAttitude":${mock.gimbalAttitude},"zoomFl":24,"hybridFl":24,"opticalFl":24,"zoomRatio":1.0,"batteryLevel":${mock.batteryPercent},"satelliteCount":${mock.satelliteCount},"homeLocation":{"latitude":${mock.location.latitude},"longitude":${mock.location.longitude}},"distanceToHome":0.0,"waypointReached":false,"waypointSeq":0,"intermediaryWaypointReached":false,"yawReached":true,"yawSeq":0,"altitudeReached":true,"altitudeSeq":0,"isRecording":true,"homeSet":true,"remainingFlightTime":1320,"timeNeededToGoHome":45,"timeNeededToLand":18,"totalTime":63,"maxRadiusCanFlyAndGoHome":900,"remainingCharge":${mock.batteryPercent},"batteryNeededToLand":12,"batteryNeededToGoHome":18,"seriousLowBatteryThreshold":10,"lowBatteryThreshold":20,"flightMode":"${mock.flightMode}","readyToTakeoff":false,"takeoffBlockReason":"MOCK_IN_FLIGHT","isManualOverrideActive":false,"autoSensingActive":$isAutoSensingActive,"detectedTargets":${DetectedTarget.listToJsonArray(currentDetectedTargets)}}"""
         }
 
         val goHomeInfo = goHomeAssessmentProcessor.value
@@ -1956,6 +1992,8 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
         val isRecording = isRecordingKey.get()
         val homeSet = isHomeSet()
         val flightMode = getFlightMode().name
+        val readyToTakeoff = isReadyToTakeoff()
+        val takeoffBlockReason = getTakeoffBlockReason()
 
         val remainingCharge = chargeRemainingProcessor.value
         val batteryNeededToLand = goHomeInfo.batteryPercentNeededToLand
@@ -1979,7 +2017,7 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
         val webRtcJson = lastWebRTCMetrics.toTelemetryJson()
         val lrfTargetJson = lrfTargetLocation?.toString() ?: "null"
 
-        return """{"droneName":"$droneName","speed":$speed,"heading":$heading,"attitude":$attitude,"location":$location,"lrfTarget":$lrfTargetJson,"phoneLocation":$phoneLocationJson,"webRtc":$webRtcJson,"gimbalAttitude":$gimbalAttitude,"gimbalJointAttitude":$gimbalJointAttitude,"zoomFl":$zoomFl,"hybridFl":$hybridFl,"opticalFl":$opticalFl,"zoomRatio":$zoomRatio,"batteryLevel":$batteryLevel,"satelliteCount":$satelliteCount,"homeLocation":$homeLocation,"distanceToHome":$distanceToHome,"waypointReached":$waypointReached,"waypointSeq":$waypointSeq,"intermediaryWaypointReached":$intermediaryWaypointReached,"yawReached":$yawReached,"yawSeq":$yawSeq,"altitudeReached":$altitudeReached,"altitudeSeq":$altitudeSeq,"isRecording":$isRecording,"homeSet":$homeSet,"remainingFlightTime":$remainingFlightTime,"timeNeededToGoHome":$timeNeededToGoHome,"timeNeededToLand":$timeNeededToLand,"totalTime":$totalTime,"maxRadiusCanFlyAndGoHome":$maxRadiusCanFlyAndGoHome,"remainingCharge":$remainingCharge,"batteryNeededToLand":$batteryNeededToLand,"batteryNeededToGoHome":$batteryNeededToGoHome,"seriousLowBatteryThreshold":$seriousLowBatteryThreshold,"lowBatteryThreshold":$lowBatteryThreshold,"flightMode":"$flightMode","isManualOverrideActive":${DroneController.isManualOverrideActive},"autoSensingActive":$isAutoSensingActive,"detectedTargets":${DetectedTarget.listToJsonArray(currentDetectedTargets)}}"""
+        return """{"droneName":"$droneName","speed":$speed,"heading":$heading,"attitude":$attitude,"location":$location,"lrfTarget":$lrfTargetJson,"phoneLocation":$phoneLocationJson,"webRtc":$webRtcJson,"gimbalAttitude":$gimbalAttitude,"gimbalJointAttitude":$gimbalJointAttitude,"zoomFl":$zoomFl,"hybridFl":$hybridFl,"opticalFl":$opticalFl,"zoomRatio":$zoomRatio,"batteryLevel":$batteryLevel,"satelliteCount":$satelliteCount,"homeLocation":$homeLocation,"distanceToHome":$distanceToHome,"waypointReached":$waypointReached,"waypointSeq":$waypointSeq,"intermediaryWaypointReached":$intermediaryWaypointReached,"yawReached":$yawReached,"yawSeq":$yawSeq,"altitudeReached":$altitudeReached,"altitudeSeq":$altitudeSeq,"isRecording":$isRecording,"homeSet":$homeSet,"remainingFlightTime":$remainingFlightTime,"timeNeededToGoHome":$timeNeededToGoHome,"timeNeededToLand":$timeNeededToLand,"totalTime":$totalTime,"maxRadiusCanFlyAndGoHome":$maxRadiusCanFlyAndGoHome,"remainingCharge":$remainingCharge,"batteryNeededToLand":$batteryNeededToLand,"batteryNeededToGoHome":$batteryNeededToGoHome,"seriousLowBatteryThreshold":$seriousLowBatteryThreshold,"lowBatteryThreshold":$lowBatteryThreshold,"flightMode":"$flightMode","readyToTakeoff":$readyToTakeoff,"takeoffBlockReason":"$takeoffBlockReason","isManualOverrideActive":${DroneController.isManualOverrideActive},"autoSensingActive":$isAutoSensingActive,"detectedTargets":${DetectedTarget.listToJsonArray(currentDetectedTargets)}}"""
     }
 
     // ==================== HTTP Server ====================
