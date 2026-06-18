@@ -29,7 +29,7 @@ from datetime import datetime
 from djiInterface import DJIInterface, canonical_lenses, LENS_KEYS
 
 # Default RC IP (WildBridge app WLAN address, port 8080). Override on the CLI.
-IP_RC = "10.177.40.4"
+IP_RC = "10.177.40.177"
 DEFAULT_SHUTTERS = 1000
 
 
