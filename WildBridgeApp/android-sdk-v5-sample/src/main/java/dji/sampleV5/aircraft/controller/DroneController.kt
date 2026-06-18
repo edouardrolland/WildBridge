@@ -68,6 +68,8 @@ object DroneController {
     const val WP_ACCEPT_ALTITUDE_M = 0.5    // vertical error in meters
     const val WP_ACCEPT_YAW_DEG = 4.0       // yaw error in degrees
 
+    const val WP_ACCEPT_DISTANCE_M_PRECISE = 0.5    // tighter horizontal threshold for "precise" acceptance, used in landing
+
     private fun distancePidKp(): Double = DroneControlProfiles.activeProfile().distanceKp
     private fun distancePidKi(): Double = DroneControlProfiles.activeProfile().distanceKi
     private fun distancePidKd(): Double = DroneControlProfiles.activeProfile().distanceKd
@@ -851,6 +853,121 @@ object DroneController {
         controlLoop.post(runnable)
     }
 
+    fun gotoWP_Precise(targetLatitude: Double, targetLongitude: Double, targetAltitude: Double) {
+        stopCurrentMission()
+        // Start new control loop session
+        val loopId = startNewControlLoopSession()
+        
+        val controlLoop = Handler(Looper.getMainLooper())
+        val updateInterval: Long = 100 // Update every 100 ms
+        var lastCommandedSpeed = 0f
+
+        // Enable Virtual Stick and advanced mode
+        // NOTE: Use VM directly, not enableVirtualStick() which would cancel the loop we just started
+        _isWaypointReached = false
+        virtualStickVM?.enableVirtualStickAdvancedMode()
+        virtualStickVM?.enableVirtualStick(object : CommonCallbacks.CompletionCallback {
+            override fun onSuccess() { }
+            override fun onFailure(error: IDJIError) {
+                /* SDK may report "already enabled" — not a real error */
+            }
+        })
+        virtualStickVM?.enableVirtualStickAdvancedMode()
+
+        val runnable = object : Runnable {
+            override fun run() {
+                // CHECK IF WE SHOULD STILL BE RUNNING
+                if (!shouldControlLoopContinue(loopId)) {
+                    setStick(0F, 0F, 0F, 0F)
+                    return
+                }
+
+                val currentPosition = getLocation3D()
+                val distanceToWaypoint = calculateDistance(
+                        targetLatitude,
+                        targetLongitude,
+                        currentPosition.latitude,
+                        currentPosition.longitude
+                )
+
+                val altError = targetAltitude - currentPosition.altitude
+
+                if (distanceToWaypoint < WP_ACCEPT_DISTANCE_M_PRECISE && abs(altError) < WP_ACCEPT_ALTITUDE_M) {
+                    setStick(0F, 0F, 0F, 0F)
+                    _isWaypointReached = true
+                    controlLoopEnabled = false
+                    return
+                }
+                // Calculate the desired yaw angle to face the waypoint
+                val desiredYaw = calculateBearing(
+                        currentPosition.latitude,
+                        currentPosition.longitude,
+                        targetLatitude,
+                        targetLongitude
+                ).toDouble()
+
+                val adjustedDesiredYaw = if (desiredYaw > 180) desiredYaw - 360 else desiredYaw
+
+                // Get the current yaw angle of the drone
+                val currentYaw = getHeading()
+
+                // Compute yaw error
+                var yawError = adjustedDesiredYaw - currentYaw
+                yawError = normalizeAngle(yawError)
+
+                // Set yaw_control to the desired yaw angle
+                val yawControl = adjustedDesiredYaw
+
+                // Compute forward speed proportional to the distance to the waypoint
+                val maxSpeed = DroneControlProfiles.activeProfile().maxHorizontalSpeedMps.toFloat()
+                val kp = 0.4f // Proportional gain
+
+                var speed = (kp * distanceToWaypoint).toFloat()
+
+                if (speed > maxSpeed) {
+                    speed = maxSpeed
+                }
+
+                // Reduce speed if the drone is not facing the waypoint
+                val maxYawError = 15f // degrees
+                val yawErrorFactor = max(0f, 1f - (abs(yawError) / maxYawError).toFloat())
+                speed *= yawErrorFactor
+
+                val maxSpeedStep = (maxHorizontalAccelMps2() * (updateInterval / 1000.0)).toFloat()
+                speed = speed.coerceAtMost(lastCommandedSpeed + maxSpeedStep)
+                lastCommandedSpeed = speed
+
+                val forwardSpeed = speed.toDouble()
+                val lateralSpeed = 0.0 // No lateral movement
+
+                // DJI SDK V5 quirk: in BODY frame, the SDK's "pitch" field actually controls
+                // lateral (left/right) movement and "roll" controls forward/backward. This is
+                // the inverse of what the field names suggest. Confirmed empirically.
+                val flightControlParam = VirtualStickFlightControlParam().apply {
+                    this.pitch = lateralSpeed
+                    this.roll = forwardSpeed
+                    this.yaw = yawControl
+                    this.verticalThrottle = targetAltitude
+                    this.verticalControlMode = VerticalControlMode.POSITION
+                    this.rollPitchControlMode = RollPitchControlMode.VELOCITY
+                    this.yawControlMode = YawControlMode.ANGLE
+                    this.rollPitchCoordinateSystem = FlightCoordinateSystem.BODY
+                }
+
+                // Send the virtual stick control data
+                virtualStickVM?.sendVirtualStickAdvancedParam(flightControlParam)
+                // Schedule the next update
+                controlLoop.postDelayed(this, updateInterval)
+            }
+        }
+        
+        // Store references to allow cancellation
+        activeControlLoopHandler = controlLoop
+        activeControlLoopRunnable = runnable
+        controlLoop.post(runnable)
+    }
+
+
     /**
      * Navigate to a waypoint under the PID loop. Returns the monotonic sequence id assigned to
      * this request; the same value is published in telemetry as "waypointSeq" so a caller can
@@ -1005,6 +1122,155 @@ object DroneController {
         controlLoop.post(runnable)
         return seq
     }
+    fun navigateToWaypointWithPID_Precise(targetLatitude: Double, targetLongitude: Double, targetAlt: Double, targetYaw: Double, maxSpeed: Double): Long {
+            val newTarget = WaypointTarget(targetLatitude, targetLongitude, targetAlt, targetYaw, maxSpeed)
+            // New target → new id, and the reached latch drops to false until this target is reached.
+            val seq = _waypointSeq.incrementAndGet()
+            _isWaypointReached = false
+
+            // If a *waypoint* PID loop is already running, just hot-swap the target.
+            // The running loop reads activeWaypointTarget each tick and will smoothly steer to the new
+            // waypoint without a cold restart. We must check activeLoopIsWaypoint, not just
+            // controlLoopEnabled: that flag is shared by gotoYaw/gotoAltitude/navigateTrajectory, none
+            // of which consume activeWaypointTarget — so swapping into one of those would lose the
+            // command. The reset request clears the PID derivative/integral kick from the error jump.
+            if (controlLoopEnabled && activeLoopIsWaypoint) {
+                activeWaypointTarget = newTarget
+                waypointPidResetRequested = true
+                return seq
+            }
+
+            // No active waypoint loop — start a fresh one (this also cancels any other active loop).
+            // Set target AFTER startNewControlLoopSession() because it calls cancelActiveControlLoop()
+            // which clears activeWaypointTarget.
+            stopCurrentMission()
+            val loopId = startNewControlLoopSession()
+            activeWaypointTarget = newTarget
+            activeLoopIsWaypoint = true
+
+            val updateInterval = 100.0  // Nominal update period (ms); real dt is measured each tick.
+            val maxYawRate = maxYawRateDegS() // degrees per second, from the active drone profile
+            var lastCommandedSpeed = 0.0
+            var lastTickMs = 0L  // SystemClock.elapsedRealtime() of the previous tick, 0 = first tick
+
+            virtualStickVM?.enableVirtualStickAdvancedMode()
+            // NOTE: Use VM directly, not enableVirtualStick() which would cancel the loop we just started
+            virtualStickVM?.enableVirtualStick(object : CommonCallbacks.CompletionCallback {
+                override fun onSuccess() { }
+                override fun onFailure(error: IDJIError) {
+                    /* SDK may report "already enabled" — not a real error */
+                }
+            })
+            virtualStickVM?.enableVirtualStickAdvancedMode()
+
+            // PID gains are all selected from the connected aircraft profile at runtime.
+            val distancePID = PID(distancePidKp(), distancePidKi(), distancePidKd(), updateInterval/1000, 0.0 to waypointPidOutputLimit())
+            val yawPID = PID(yawPidKp(), 0.0000, 0.00, updateInterval/1000, -maxYawRate to maxYawRate)
+
+            val controlLoop = Handler(Looper.getMainLooper())
+            virtualStickVM?.enableVirtualStickAdvancedMode()
+
+            // Cooldown: after reaching a waypoint, keep PID loop alive for this long
+            // to allow the bridge to hot-swap the next target without a cold restart.
+            val holdCooldownMs = 200L
+            var reachedAtMs = 0L  // SystemClock.elapsedRealtime() when waypoint was first reached, 0 = not reached
+
+            val runnable = object : Runnable {
+                override fun run() {
+                    // CHECK IF WE SHOULD STILL BE RUNNING
+                    if (!shouldControlLoopContinue(loopId)) {
+                        setStick(0F, 0F, 0F, 0F)
+                        return
+                    }
+
+                    // Read the current target (may have been hot-swapped by a new call)
+                    val target = activeWaypointTarget
+                    if (target == null) {
+                        setStick(0F, 0F, 0F, 0F)
+                        controlLoopEnabled = false
+                        disableVirtualStick()
+                        return
+                    }
+
+                    // Measure the real timestep instead of assuming updateInterval. The loop runs on
+                    // the main Looper, whose cadence drifts under load; clamp so a stalled thread can't
+                    // inject a huge dt spike into the PID derivative/integral or the accel limiter.
+                    val nowMs = android.os.SystemClock.elapsedRealtime()
+                    val dtSec = if (lastTickMs == 0L) updateInterval / 1000.0
+                                else ((nowMs - lastTickMs) / 1000.0).coerceIn(0.02, 0.5)
+                    lastTickMs = nowMs
+
+                    // A hot-swapped target is a discontinuous setpoint — clear PID history once so the
+                    // jump in distance/yaw error doesn't produce an integral/derivative kick.
+                    if (waypointPidResetRequested) {
+                        waypointPidResetRequested = false
+                        distancePID.reset()
+                        yawPID.reset()
+                    }
+
+                    val currentPosition = getLocation3D()
+                    val currentYaw = getHeading()
+
+                    val distance = calculateDistance(target.latitude, target.longitude, currentPosition.latitude, currentPosition.longitude)
+                    val pidSpeed = distancePID.update(distance, dtSec).coerceAtMost(target.maxSpeed)
+                    val maxSpeedStep = maxHorizontalAccelMps2() * dtSec
+                    val targetSpeed = pidSpeed.coerceAtMost(lastCommandedSpeed + maxSpeedStep)
+                    lastCommandedSpeed = targetSpeed
+                    val movementDirection = calculateBearing(currentPosition.latitude, currentPosition.longitude, target.latitude, target.longitude).toDouble()
+
+                    val yawError = normalizeAngle(target.yaw - currentYaw)
+                    val angularVelocity = yawPID.update(yawError, dtSec)
+
+                    val movementDirectionRelative = normalizeAngle(movementDirection - currentYaw) // Relative to the drone's heading
+                    val forwardSpeed = targetSpeed * cos(Math.toRadians(movementDirectionRelative))
+                    val lateralSpeed = targetSpeed * sin(Math.toRadians(movementDirectionRelative))
+
+                    val altError = target.altitude - currentPosition.altitude
+
+                    if (distance < WP_ACCEPT_DISTANCE_M_PRECISE && abs(yawError) < WP_ACCEPT_YAW_DEG && abs(altError) < WP_ACCEPT_ALTITUDE_M) {
+                        val now = android.os.SystemClock.elapsedRealtime()
+                        if (!_isWaypointReached) {
+                            _isWaypointReached = true
+                            reachedAtMs = now
+                        }
+                        // Cooldown expired — no new waypoint arrived, stop cleanly
+                        if (now - reachedAtMs >= holdCooldownMs) {
+                            setStick(0F, 0F, 0F, 0F)
+                            activeWaypointTarget = null
+                            controlLoopEnabled = false
+                            disableVirtualStick()
+                            return
+                        }
+                    } else {
+                        // Moved outside acceptance (e.g. GPS drift or new target) — reset cooldown
+                        reachedAtMs = 0L
+                    }
+
+                    // DJI SDK V5 quirk: in BODY frame, the SDK's "pitch" field actually controls
+                    // lateral (left/right) movement and "roll" controls forward/backward. This is
+                    // the inverse of what the field names suggest. Confirmed empirically.
+                    val flightControlParam = VirtualStickFlightControlParam().apply {
+                        this.pitch = lateralSpeed
+                        this.roll = forwardSpeed
+                        this.yaw = angularVelocity
+                        this.verticalThrottle = target.altitude
+                        this.verticalControlMode = VerticalControlMode.POSITION
+                        this.rollPitchControlMode = RollPitchControlMode.VELOCITY
+                        this.yawControlMode = YawControlMode.ANGULAR_VELOCITY
+                        this.rollPitchCoordinateSystem = FlightCoordinateSystem.BODY
+                    }
+
+                    virtualStickVM?.sendVirtualStickAdvancedParam(flightControlParam)
+                    controlLoop.postDelayed(this, updateInterval.toLong())
+                }
+            }
+            
+            // Store references to allow cancellation
+            activeControlLoopHandler = controlLoop
+            activeControlLoopRunnable = runnable
+            controlLoop.post(runnable)
+            return seq
+        }
 
     fun navigateTrajectory(
         waypoints: List<Triple<Double, Double, Double>>,

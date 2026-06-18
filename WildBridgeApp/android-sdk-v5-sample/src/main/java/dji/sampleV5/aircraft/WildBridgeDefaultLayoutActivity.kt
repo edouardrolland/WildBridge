@@ -2225,7 +2225,7 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
                     }
                     "/send/gimbal/rel_yaw" -> {
                         val cmd = postData.split(",")
-                        val roll = cmd[0].toDouble()
+                     `   val roll = cmd[0].toDouble()
                         val pitch = cmd[1].toDouble()
                         val yaw = cmd[2].toDouble()
                         val rot = GimbalAngleRotation(
@@ -2316,6 +2316,20 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
                         DroneController.gotoWP(latitude, longitude, altitude)
                         "Waypoint command received: Latitude=$latitude, Longitude=$longitude, Altitude=$altitude"
                     }
+
+                    "/send/gotoWP_Precise" -> {
+                        if (DroneController.shouldRejectAutonomousCommand("gotoWP_Precise")) {
+                            return "REJECTED: Manual override active. Deactivate manual override first."
+                        }
+                        val cmd = postData.split(",")
+                        if (cmd.size < 3) return "Invalid input. Expected format: lat,lon,alt"
+                        val latitude = cmd[0].toDouble()
+                        val longitude = cmd[1].toDouble()
+                        val altitude = cmd[2].toDouble()
+                        DroneController.gotoWP_Precise(latitude, longitude, altitude)
+                        "Precise waypoint command received: Latitude=$latitude, Longitude=$longitude, Altitude=$altitude"
+                    }
+
                     "/send/gotoWPwithPID" -> {
                         if (DroneController.shouldRejectAutonomousCommand("gotoWPwithPID")) {
                             return "REJECTED: Manual override active. Deactivate manual override first."
@@ -2331,6 +2345,21 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
                         // seq=<n> lets the caller match the streamed telemetry "waypointSeq"/"waypointReached"
                         // to THIS command, instead of a stale latched value from the previous waypoint.
                         "WAYPOINT_ACCEPTED seq=$seq Latitude=$latitude, Longitude=$longitude, Altitude=$altitude, Yaw=$yaw, MaxSpeed=$maxSpeed"
+                    }
+
+                    "/send/gotoWPwithPID_Precise" -> {
+                        if (DroneController.shouldRejectAutonomousCommand("gotoWPwithPID_Precise")) {
+                            return "REJECTED: Manual override active. Deactivate manual override first."
+                        }
+                        val cmd = postData.split(",")
+                        if (cmd.size < 5) return "Invalid input. Expected format: lat,lon,alt,yaw,maxSpeed"
+                        val latitude = cmd[0].toDouble()
+                        val longitude = cmd[1].toDouble()
+                        val altitude = cmd[2].toDouble()
+                        val yaw = cmd[3].toDouble()
+                        val maxSpeed = cmd[4].toDouble()
+                        val seq = DroneController.navigateToWaypointWithPID_Precise(latitude, longitude, altitude, yaw, maxSpeed)
+                        "PRECISE_WAYPOINT_ACCEPTED seq=$seq Latitude=$latitude, Longitude=$longitude, Altitude=$altitude, Yaw=$yaw, MaxSpeed=$maxSpeed"
                     }
                     "/send/navigateTrajectory" -> {
                         if (DroneController.shouldRejectAutonomousCommand("navigateTrajectory")) {
