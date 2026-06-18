@@ -13,8 +13,8 @@ from datetime import datetime
 from djiInterface import DJIInterface, canonical_lenses, LENS_KEYS
 
 # Default RC IP (WildBridge app WLAN address, port 8080). Override on the CLI.
-IP_RC = "10.177.40.4"
-DEFAULT_ITERS = 20
+IP_RC = "172.18.64.251"
+DEFAULT_ITERS = 1
 
 
 def is_jpeg(data: bytes) -> bool:

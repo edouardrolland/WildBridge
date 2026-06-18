@@ -85,6 +85,8 @@ import dji.v5.et.create
 import dji.v5.et.get
 import dji.v5.et.set
 import dji.v5.manager.KeyManager
+import dji.v5.manager.diagnostic.DJIDeviceStatus
+import dji.v5.manager.diagnostic.DeviceStatusManager
 import dji.v5.ux.core.util.DataProcessor
 import dji.v5.ux.sample.showcase.defaultlayout.DefaultLayoutActivity
 import dji.v5.manager.intelligent.AutoSensingInfo
@@ -1898,30 +1900,17 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
     /**
      * Whether the aircraft is ready to take off / arm.
      *
-     * No single SDK key reports this, so it is derived:
-     *  - Foundation (documented keys): connected, not flying, motors off, GPS level >= 3.
-     *  - Enrich (Tier-1, undocumented keys): NotAllowMotorStart false and TakeoffFailureError == NONE.
-     *    These may be null on some aircraft; null is treated as non-blocking.
+     * Mirrors the DJI system-status banner: ready when it reads "Ready to Go (GPS)",
+     * i.e. [DJIDeviceStatus.NORMAL]. Any other status counts as not ready.
      */
-    private fun isReadyToTakeoff(): Boolean {
-        val connected = flightControllerConnectionKey.get(false)
-        val flying = isFlyingKey.get(false)
-        val motorsOn = areMotorsOnKey.get(false)
-        val gpsLevel = gpsSignalLevelKey.get(GPSSignalLevel.UNKNOWN)
-        val notAllowMotorStart: Boolean? = notAllowMotorStartKey.get()
-        val takeoffFailure: FCMotorStartFailureError? = takeoffFailureErrorKey.get()
+    private fun isReadyToTakeoff(): Boolean =
+        DeviceStatusManager.getInstance().getCurrentDJIDeviceStatus() == DJIDeviceStatus.NORMAL
 
-        return connected &&
-                !flying &&
-                !motorsOn &&
-                gpsLevel.value() >= GPSSignalLevel.LEVEL_3.value() &&
-                notAllowMotorStart != true &&
-                (takeoffFailure == null || takeoffFailure == FCMotorStartFailureError.NONE)
+    /** Reason the aircraft cannot take off, or "NONE" when ready. Mirrors the DJI status banner. */
+    private fun getTakeoffBlockReason(): String {
+        val status = DeviceStatusManager.getInstance().getCurrentDJIDeviceStatus()
+        return if (status == DJIDeviceStatus.NORMAL) "NONE" else status.name
     }
-
-    /** Reason the aircraft cannot take off, or "NONE". "UNKNOWN" when the key is unsupported. */
-    private fun getTakeoffBlockReason(): String =
-        takeoffFailureErrorKey.get()?.name ?: "UNKNOWN"
     private fun getTimeNeededToGoHome(): Int = goHomeAssessmentProcessor.value.timeNeededToGoHome
     private fun getTimeNeededToLand(): Int = timeNeededToLandProcessor.value
 

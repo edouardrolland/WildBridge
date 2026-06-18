@@ -12,6 +12,8 @@ import dji.sdk.keyvalue.value.common.LocationCoordinate3D
 import dji.sdk.keyvalue.value.common.Velocity3D
 import dji.sampleV5.aircraft.controller.DroneController
 import dji.v5.manager.KeyManager
+import dji.v5.manager.diagnostic.DJIDeviceStatus
+import dji.v5.manager.diagnostic.DeviceStatusManager
 import dji.v5.ux.detection.DetectedTarget
 import dji.v5.et.create
 
@@ -132,15 +134,18 @@ object TelemetryProvider {
 
     /**
      * Derived take-off readiness. See [FrameMetadata.readyToTakeoff].
-     * Foundation = documented keys; enrich = Tier-1 (undocumented, null-safe) keys.
+     * Mirrors the DJI system-status banner: ready when it reads "Ready to Go (GPS)"
+     * ([DJIDeviceStatus.NORMAL]). getCurrentDJIDeviceStatus() is a cheap in-memory
+     * getter, so it is safe to call per frame.
      */
     private fun computeReadyToTakeoff(): Boolean =
-        cachedConnection &&
-            !cachedIsFlying &&
-            !cachedMotorsOn &&
-            cachedGpsLevel.value() >= GPSSignalLevel.LEVEL_3.value() &&
-            cachedNotAllowMotorStart != true &&
-            (cachedTakeoffFailure == null || cachedTakeoffFailure == FCMotorStartFailureError.NONE)
+        DeviceStatusManager.getInstance().getCurrentDJIDeviceStatus() == DJIDeviceStatus.NORMAL
+
+    /** Reason the aircraft cannot take off, or "NONE" when ready. Mirrors the DJI status banner. */
+    private fun computeTakeoffBlockReason(): String {
+        val status = DeviceStatusManager.getInstance().getCurrentDJIDeviceStatus()
+        return if (status == DJIDeviceStatus.NORMAL) "NONE" else status.name
+    }
 
     /**
      * Stop all telemetry listeners.
@@ -309,7 +314,7 @@ object TelemetryProvider {
             isFlying = cachedIsFlying,
             flightMode = cachedFlightMode,
             readyToTakeoff = computeReadyToTakeoff(),
-            takeoffBlockReason = cachedTakeoffFailure?.name ?: "UNKNOWN",
+            takeoffBlockReason = computeTakeoffBlockReason(),
             isManualOverrideActive = DroneController.isManualOverrideActive,
             detectedTargets = currentDetectedTargets
         )
