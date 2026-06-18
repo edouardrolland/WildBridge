@@ -141,7 +141,7 @@ def finalize_trial(tag, csv_path, fig, vs, rolls, pitches, reached_t):
 
 
 def main():
-    ip = "172.18.64.177"  # REPLACE WITH YOUR RC IP
+    ip = "172.18.64.173"  # REPLACE WITH YOUR RC IP
     dji = DJIInterface(ip)
     if dji.IP_RC == "":
         print("No drone IP. Pass it as an argument or ensure discovery works.")
@@ -178,7 +178,7 @@ def main():
     # Enable virtual stick, then command the waypoint via the XPRIZE tuning endpoint.
     dji.requestSendEnableVirtualStick()
     seq = dji.requestSendGoToWPwithPID(
-        tgt_lat, tgt_lon, alt0, 11.0, MAX_SPEED)
+        tgt_lat, tgt_lon, alt0, heading, MAX_SPEED)
     if seq is None:
         print("Waypoint command rejected (no seq). Check manual override / arming.")
         dji.stopTelemetryStream()

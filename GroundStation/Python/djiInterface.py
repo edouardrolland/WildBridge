@@ -530,12 +530,7 @@ class DJIInterface:
         return self.requestSend(EP_TUNING, f"{latitude},{longitude},{altitude},{yaw},{kp_pos},{ki_pos},{kd_pos},{kp_yaw},{ki_yaw},{kd_yaw}")
 
     def requestSendGoToWPwithPIDprecise(self, latitude, longitude, altitude, yaw, max_speed):
-        """Navigate to a waypoint with the two-phase yaw-then-translate controller.
-
-        Phase 1 rotates the drone in place to the target yaw; phase 2 flies to the waypoint.
-        All PID gains and the max horizontal accel come from the active aircraft profile (same
-        params as requestSendGoToWPwithPID).
-
+        """
         Args:
             latitude, longitude, altitude: Target position
             yaw: Target yaw angle
