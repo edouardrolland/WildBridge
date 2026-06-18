@@ -501,14 +501,22 @@ class DJIInterface:
         return self.requestSend(EP_GOTO_WP, f"{latitude},{longitude},{altitude}")
 
     def requestSendGoToWPwithPID(self, latitude, longitude, altitude, yaw, speed: float = 20.0):
-        """Navigate to a waypoint with PID control.
+        """Navigate to a waypoint with PID control (nose-follows-path, final-heading).
+
+        CONTRACT: during travel the drone faces its direction of motion — the bridge forces the
+        travel heading to bearing(current->waypoint). The `yaw` argument is the FINAL arrival
+        heading: once the drone reaches the waypoint it rotates in place to `yaw` (Phase 3), and
+        only then is the waypoint reported reached. If you instead need the nose pointed at `yaw`
+        *while* translating, use requestSendGoToWPwithPIDprecise, which projects the to-waypoint
+        vector into the body frame.
 
         Args:
             latitude: Target latitude
             longitude: Target longitude
             altitude: Target altitude
-            yaw: Target yaw angle
-            speed: Max speed in m/s (default 5.0)
+            yaw: Final arrival heading (deg). Drone rotates to this in place after reaching the WP;
+                 it does NOT set the travel heading (that is auto = bearing to waypoint).
+            speed: Max speed in m/s (default 20.0)
 
         Returns:
             int: the sequence id the app assigned to this request (parsed from the
@@ -865,6 +873,8 @@ class DJIInterfaceLite:
         return self.requestSend(EP_GOTO_WP, f"{latitude},{longitude},{altitude}")
 
     def requestSendGoToWPwithPID(self, latitude, longitude, altitude, yaw):
+        # nose-follows-path: travel heading is auto (bearing to WP); `yaw` is the FINAL arrival
+        # heading the drone rotates to in place after reaching the waypoint (Phase 3).
         return self.requestSend(EP_GOTO_WP_PID, f"{latitude},{longitude},{altitude},{yaw}")
     
     def requestSendGoToWPwithPIDtuning(self, latitude, longitude, altitude, yaw, kp_pos, ki_pos, kd_pos, kp_yaw, ki_yaw, kd_yaw):

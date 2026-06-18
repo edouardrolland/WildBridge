@@ -216,8 +216,11 @@ object DroneController {
         val latitude: Double,
         val longitude: Double,
         val altitude: Double,
-        val yaw: Double,
-        val maxSpeed: Double
+        val yaw: Double,        // TRACK yaw: heading held while translating (bearing to the WP)
+        val maxSpeed: Double,
+        // FINAL yaw: heading the drone rotates to in place once it has arrived (Phase 3). Defaults
+        // to the track yaw so callers that don't care about arrival heading keep the old behaviour.
+        val finalYaw: Double = yaw
     )
 
     @Volatile
@@ -1007,8 +1010,24 @@ object DroneController {
         return seq
     }
 
+    /**
+     * CONTRACT: nose-follows-path controller with a final-heading phase. Three phases:
+     *   Phase 1 ALIGN  — rotate in place to the TRACK heading = bearing(current -> WP).
+     *   Phase 2 NAV    — translate to the WP, nose held on the track heading (cross-track owns lateral).
+     *   Phase 3 FINAL  — once arrived (position + altitude), rotate in place to the user-requested
+     *                    [targetYaw], holding position. Only then is the waypoint latched as reached.
+     * So during travel the drone faces its direction of motion (required by the Phase-2 motion law,
+     * which dead-reckons forwardSpeed along body-X), and [targetYaw] sets the heading the drone ends
+     * up facing AT the waypoint. If you need the nose pointed at [targetYaw] while translating, use
+     * navigateToWaypointWithPIDprecise instead, which projects the to-waypoint vector into body frame.
+     */
     fun navigateToWaypointWithPID(targetLatitude: Double, targetLongitude: Double, targetAlt: Double, targetYaw: Double, maxSpeed: Double): Long {
-        val newTarget = WaypointTarget(targetLatitude, targetLongitude, targetAlt, targetYaw, maxSpeed)
+        // Track yaw = bearing(current position -> waypoint): the heading held during Phase 1/2.
+        // The caller-supplied targetYaw becomes the Phase-3 final heading (finalYaw). Recomputed here
+        // so both the cold-start and hot-swap paths below anchor the nose on the new leg.
+        val startPos = getLocation3D()
+        val trackYaw = calculateBearing(startPos.latitude, startPos.longitude, targetLatitude, targetLongitude).toDouble()
+        val newTarget = WaypointTarget(targetLatitude, targetLongitude, targetAlt, trackYaw, maxSpeed, finalYaw = targetYaw)
         // New target → new id, and the reached latch drops to false until this target is reached.
         val seq = _waypointSeq.incrementAndGet()
         _isWaypointReached = false
@@ -1066,7 +1085,9 @@ object DroneController {
         var crossTrackFilt = 0.0      // low-pass of signed cross-track offset (m); kills stepped-GPS jitter
         var crossTrackInit = false
         var lastLateralSpeed = 0.0    // for the lateral slew limit
-        var yawAligned = false        // false => rotate-in-place phase; true => translate-to-WP phase
+        var yawAligned = false        // Phase 1->2: false => rotate to track heading; true => translate
+        var positionReached = false   // Phase 2->3: true once within WP distance+altitude; Phase 3 then
+                                      // rotates in place to target.finalYaw before latching reached.
         val crossTrackKp = 0.5        // m/s of lateral correction per m of offset
         val maxLateralSpeed = 3.0     // hard cap on lateral correction (m/s)
         val crossTrackLpfAlpha = 0.3  // 0..1 low-pass weight; lower = smoother
@@ -1131,6 +1152,7 @@ object DroneController {
                     crossTrackInit = false
                     lastLateralSpeed = 0.0
                     yawAligned = false
+                    positionReached = false
                 }
 
                 val currentPosition = getLocation3D()
@@ -1170,6 +1192,51 @@ object DroneController {
                 }
 
                 val distance = calculateDistance(target.latitude, target.longitude, currentPosition.latitude, currentPosition.longitude)
+                val altErrorNav = target.altitude - currentPosition.altitude
+
+                // Phase 2 -> 3 transition: latch positionReached once inside the WP position + altitude
+                // tolerance. From then on we stop translating and run Phase 3 (FINAL ALIGN).
+                if (!positionReached && distance < WP_ACCEPT_DISTANCE_M && abs(altErrorNav) < WP_ACCEPT_ALTITUDE_M) {
+                    positionReached = true
+                }
+
+                // Phase 3 (FINAL ALIGN): rotate in place to the user-requested arrival heading
+                // (target.finalYaw), holding position and altitude. The waypoint is only latched as
+                // reached once that heading is within tolerance; until then the cooldown stays unarmed.
+                if (positionReached) {
+                    val finalYawError = normalizeAngle(target.finalYaw - currentYaw)
+                    val finalAngularVelocity = yawPID.update(finalYawError, dtSec)
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    if (abs(finalYawError) < WP_ACCEPT_YAW_DEG) {
+                        if (!_isWaypointReached) {
+                            _isWaypointReached = true
+                            reachedAtMs = now
+                        }
+                        // Cooldown expired — no new waypoint hot-swapped in, stop cleanly.
+                        if (now - reachedAtMs >= holdCooldownMs) {
+                            setStick(0F, 0F, 0F, 0F)
+                            activeWaypointTarget = null
+                            controlLoopEnabled = false
+                            disableVirtualStick()
+                            return
+                        }
+                    } else {
+                        reachedAtMs = 0L  // still rotating to final heading — keep the cooldown unarmed
+                    }
+                    lastParam = VirtualStickFlightControlParam().apply {
+                        this.pitch = 0.0
+                        this.roll = 0.0
+                        this.yaw = finalAngularVelocity
+                        this.verticalThrottle = target.altitude
+                        this.verticalControlMode = VerticalControlMode.POSITION
+                        this.rollPitchControlMode = RollPitchControlMode.VELOCITY
+                        this.yawControlMode = YawControlMode.ANGULAR_VELOCITY
+                        this.rollPitchCoordinateSystem = FlightCoordinateSystem.BODY
+                    }
+                    lastParam?.let { virtualStickVM?.sendVirtualStickAdvancedParam(it) }
+                    controlLoop.postDelayed(this, sendIntervalMs)
+                    return
+                }
 
                 // Forward speed: distance-PID, clamped to maxSpeed, a kinematic decel cap so the
                 // drone can always brake within the remaining distance (v <= sqrt(2*a*d)), then the
@@ -1214,27 +1281,8 @@ object DroneController {
                 val alongRemaining = if (segLen > 0.1) segLen - (pn * bn + pe * be) / segLen else 0.0
                 val forwardSpeed = if (alongRemaining >= 0.0) targetSpeed else -targetSpeed
 
-                val altError = target.altitude - currentPosition.altitude
-
-                // Arrival no longer gates on yaw — heading is already aligned in Phase 1.
-                if (distance < WP_ACCEPT_DISTANCE_M && abs(altError) < WP_ACCEPT_ALTITUDE_M) {
-                    val now = android.os.SystemClock.elapsedRealtime()
-                    if (!_isWaypointReached) {
-                        _isWaypointReached = true
-                        reachedAtMs = now
-                    }
-                    // Cooldown expired — no new waypoint arrived, stop cleanly
-                    if (now - reachedAtMs >= holdCooldownMs) {
-                        setStick(0F, 0F, 0F, 0F)
-                        activeWaypointTarget = null
-                        controlLoopEnabled = false
-                        disableVirtualStick()
-                        return
-                    }
-                } else {
-                    // Moved outside acceptance (e.g. GPS drift or new target) — reset cooldown
-                    reachedAtMs = 0L
-                }
+                // Arrival (position + final-yaw) is handled by the Phase 3 block above, which
+                // early-returns. Reaching here means we are still translating (Phase 2).
 
                 // DJI SDK V5 quirk: in BODY frame, the SDK's "pitch" field actually controls
                 // lateral (left/right) movement and "roll" controls forward/backward. This is

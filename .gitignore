@@ -59,6 +59,7 @@ GroundStation/Python/capture_*/
 /GroundStation/__pycache__
 
 /GroundStation/cameraCalibrations
+GroundStation/Python/trials
 
 # Android build outputs
 **/build/

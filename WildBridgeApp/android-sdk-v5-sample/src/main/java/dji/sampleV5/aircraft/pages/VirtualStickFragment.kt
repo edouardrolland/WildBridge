@@ -437,19 +437,24 @@ class VirtualStickFragment : DJIFragment() {
                         if (DroneController.shouldRejectAutonomousCommand("gotoWPwithPID")) {
                             return "REJECTED: Manual override active. Deactivate manual override first."
                         }
+                        // NOTE: nose-follows-path endpoint. During travel the drone faces its
+                        // direction of motion (heading is forced to bearing(current->waypoint)); the
+                        // yaw field is the FINAL arrival heading the drone rotates to in place once it
+                        // reaches the waypoint (Phase 3). Use /send/gotoWPwithPIDprecise if you need the
+                        // nose pointed at yaw *while* translating.
                         val cmd = postData.split(",")
                         if (cmd.size < 5) {
-                            return "Invalid input. Expected format: lat,lon,alt,yaw,maxSpeed"
+                            return "Invalid input. Expected format: lat,lon,alt,yaw,maxSpeed (yaw = final arrival heading)"
                         }
                         val latitude = cmd[0].toDouble()
                         val longitude = cmd[1].toDouble()
                         val altitude = cmd[2].toDouble()
-                        val yaw = cmd[3].toDouble()
+                        val yaw = cmd[3].toDouble()  // final arrival heading (Phase 3); travel heading is auto
                         val maxSpeed = cmd[4].toDouble()
                         val seq = DroneController.navigateToWaypointWithPID(latitude, longitude, altitude, yaw, maxSpeed)
                         // seq=<n> lets the caller match the streamed telemetry "waypointSeq"/"waypointReached"
                         // to THIS command, instead of a stale latched value from the previous waypoint.
-                        "WAYPOINT_ACCEPTED seq=$seq Latitude=$latitude, Longitude=$longitude, Altitude=$altitude, Yaw=$yaw, MaxSpeed=$maxSpeed"
+                        "WAYPOINT_ACCEPTED seq=$seq Latitude=$latitude, Longitude=$longitude, Altitude=$altitude, FinalYaw=$yaw, MaxSpeed=$maxSpeed"
                     }
                     "/send/navigateTrajectory" -> {
                         if (DroneController.shouldRejectAutonomousCommand("navigateTrajectory")) {

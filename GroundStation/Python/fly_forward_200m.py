@@ -175,10 +175,12 @@ def main():
     dji.requestAbortAll()
     time.sleep(0.5)  # let the loop tear down before re-enabling the stick
 
+    tgt_lat, tgt_lon = 65.083154, -147.710657
+    
     # Enable virtual stick, then command the waypoint via the XPRIZE tuning endpoint.
     dji.requestSendEnableVirtualStick()
     seq = dji.requestSendGoToWPwithPID(
-        tgt_lat, tgt_lon, alt0, heading, MAX_SPEED)
+        tgt_lat, tgt_lon, alt0, 106.0, MAX_SPEED)
     if seq is None:
         print("Waypoint command rejected (no seq). Check manual override / arming.")
         dji.stopTelemetryStream()
