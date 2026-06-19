@@ -1,5 +1,7 @@
 package dji.sampleV5.aircraft.controller
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -32,6 +34,7 @@ import dji.sdk.keyvalue.value.payload.WidgetValue
 import java.io.OutputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import kotlin.math.roundToInt
 
 /**
  * Hybrid-payload control — Laser Range Finder (LRF) and multi-lens photo capture.
@@ -523,6 +526,50 @@ object Payload {
         return bytes
     }
 
+    // Target short side (px) for downscaled zoom images, and JPEG quality of the re-encode.
+    private const val ZOOM_TARGET_SHORT_SIDE = 1080
+    private const val ZOOM_JPEG_QUALITY = 85
+
+    // Decode a JPEG, downscale so its SHORTER side is ~1080 px (aspect preserved, never upscaled),
+    // and re-encode to JPEG. The re-encode discards all EXIF/metadata by design. Returns the
+    // original bytes unchanged if the image can't be decoded or is already <= the target.
+    private fun downscaleZoomTo1080p(jpeg: ByteArray, label: String): ByteArray {
+        // Pass 1: read dimensions only, no pixel allocation.
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, bounds)
+        val srcW = bounds.outWidth
+        val srcH = bounds.outHeight
+        if (srcW <= 0 || srcH <= 0) {
+            Log.w(TAG, "Zoom downscale: undecodable $label, sending original")
+            return jpeg
+        }
+        val shortSide = minOf(srcW, srcH)
+        if (shortSide <= ZOOM_TARGET_SHORT_SIDE) return jpeg  // already small enough
+
+        // Pass 2: power-of-2 subsample to just above target (bounds peak memory), then exact scale.
+        var sample = 1
+        while (shortSide / (sample * 2) >= ZOOM_TARGET_SHORT_SIDE) sample *= 2
+        val decoded = BitmapFactory.decodeByteArray(
+            jpeg, 0, jpeg.size, BitmapFactory.Options().apply { inSampleSize = sample }
+        ) ?: run {
+            Log.w(TAG, "Zoom downscale: decode failed $label, sending original")
+            return jpeg
+        }
+
+        val scale = ZOOM_TARGET_SHORT_SIDE.toFloat() / minOf(decoded.width, decoded.height)
+        val dstW = (decoded.width * scale).roundToInt()
+        val dstH = (decoded.height * scale).roundToInt()
+        val scaled = Bitmap.createScaledBitmap(decoded, dstW, dstH, true)
+        if (scaled !== decoded) decoded.recycle()
+
+        val baos = java.io.ByteArrayOutputStream()
+        scaled.compress(Bitmap.CompressFormat.JPEG, ZOOM_JPEG_QUALITY, baos)
+        scaled.recycle()
+        val out = baos.toByteArray()
+        Log.i(TAG, "Zoom downscale $label: ${srcW}x$srcH -> ${dstW}x$dstH (${jpeg.size} -> ${out.size} bytes)")
+        return out
+    }
+
     // ==================== SD-card media access (robust, source-of-truth path) ====================
     //
     // Downloads resolve by FILENAME against the camera's own media list (mediaVM.mediaFileListData),
@@ -611,10 +658,18 @@ object Payload {
     // response on failure.
     private fun streamMediaFile(mediaFile: MediaFile, label: String, outputStream: OutputStream) {
         try {
-            val bytes = downloadToBytes(mediaFile)
-            if (bytes == null) {
+            val original = downloadToBytes(mediaFile)
+            if (original == null) {
                 sendErrorResponse(outputStream, "Failed to download $label")
                 return
+            }
+            // Zoom lens shots are full-res (very large). Downscale to 1080p before sending; the
+            // re-encode also strips all EXIF/metadata, which we don't want forwarded. Other lenses
+            // (wide/thermal) are sent untouched.
+            val bytes = if (isZoomName(mediaFile.fileName)) {
+                downscaleZoomTo1080p(original, mediaFile.fileName)
+            } else {
+                original
             }
             val headers = StringBuilder().apply {
                 append("HTTP/1.1 200 OK\r\n")
