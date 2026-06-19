@@ -141,7 +141,7 @@ def finalize_trial(tag, csv_path, fig, vs, rolls, pitches, reached_t):
 
 
 def main():
-    ip = "172.18.64.173"  # REPLACE WITH YOUR RC IP
+    ip = "172.18.64.230"  # REPLACE WITH YOUR RC IP
     dji = DJIInterface(ip)
     if dji.IP_RC == "":
         print("No drone IP. Pass it as an argument or ensure discovery works.")
@@ -179,118 +179,10 @@ def main():
     
     # Enable virtual stick, then command the waypoint via the XPRIZE tuning endpoint.
     dji.requestSendEnableVirtualStick()
-    seq = dji.requestSendGoToWPwithPID(
-        tgt_lat, tgt_lon, alt0, 106.0, MAX_SPEED)
-    if seq is None:
-        print("Waypoint command rejected (no seq). Check manual override / arming.")
-        dji.stopTelemetryStream()
-        return
-    print(f"Waypoint accepted, seq={seq}. Flying...")
-
-    # ---- Live plot (2 stacked panels, shared time axis) ----
-    t0 = time.time()
-    ts, vs = [], []
-    rolls, pitches = [], []  # drone attitude (deg) — shows roll/pitch oscillation
-
-    # Open the CSV now and write every sample as it arrives (flushed each tick) so the
-    # raw log is on disk even if the script is killed mid-flight.
-    csv_file, csv_writer, tag, csv_path = open_trial_csv()
-
-    fig, (ax_v, ax_a) = plt.subplots(2, 1, sharex=True, figsize=(9, 7))
-    fig.suptitle(f"200 m forward  |  Kp={DISTANCE_KP:g}  Kd={DISTANCE_KD:g}  accel={MAX_HORIZONTAL_ACCEL:g} m/s^2")
-
-    (line_v,) = ax_v.plot([], [], lw=2, color="C0", label="horizontal ground speed")
-    ax_v.axhline(MAX_SPEED, color="red", ls="--", lw=1.5,
-                 label=f"max speed sent ({MAX_SPEED} m/s)")
-    ax_v.set_ylabel("speed (m/s)")
-    ax_v.legend(loc="lower right")
-    ax_v.grid(True)
-
-    (line_r,) = ax_a.plot([], [], lw=1.5, color="C1", label="roll")
-    (line_p,) = ax_a.plot([], [], lw=1.5, color="C2", label="pitch")
-    ax_a.axhline(0.0, color="gray", ls=":", lw=1)
-    ax_a.set_xlabel("time (s)")
-    ax_a.set_ylabel("attitude (deg)")
-    ax_a.legend(loc="lower right")
-    ax_a.grid(True)
-
-    artists = (line_v, line_r, line_p)
-    state = {"done": False, "reached_t": None}
-
-    def update(_frame):
-        # Once the waypoint is reached, stop logging new samples — the curves freeze
-        # but the plot window stays open so it can be inspected. Don't close the figure.
-        if state["done"]:
-            return artists
-
-        t = time.time() - t0
-        if dji.isWaypointReached(seq):
-            state["done"] = True
-            state["reached_t"] = t
-            print(f"Waypoint {seq} reached at t={t:.1f}s. Logging stopped (plot stays open).")
-            ani.event_source.stop()
-            return artists
-
-        v = horizontal_speed(dji.getSpeed())
-        att = dji.getAttitude()
-        roll = (att.get("roll", 0.0) or 0.0) if isinstance(att, dict) else 0.0
-        pitch = (att.get("pitch", 0.0) or 0.0) if isinstance(att, dict) else 0.0
-
-        ts.append(t); vs.append(v); rolls.append(roll); pitches.append(pitch)
-        # Persist this sample immediately — flush so a kill keeps everything so far.
-        csv_writer.writerow([f"{t:.3f}", f"{v:.4f}", f"{roll:.4f}", f"{pitch:.4f}"])
-        csv_file.flush()
-
-        line_v.set_data(ts, vs)
-        line_r.set_data(ts, rolls)
-        line_p.set_data(ts, pitches)
-
-        ax_v.set_xlim(0, max(10, t))
-        ax_v.set_ylim(0, max(MAX_SPEED * 1.2, max(vs) * 1.1 if vs else 1))
-        amax = max((abs(x) for x in rolls + pitches), default=1.0)
-        amax = max(amax * 1.2, 1.0)
-        ax_a.set_ylim(-amax, amax)
-        return artists
-
-    ani = animation.FuncAnimation(fig, update, interval=100,
-                                  cache_frame_data=False)
-
-    cleaned = {"done": False}
-
-    def cleanup():
-        # Idempotent: SIGTERM handler, KeyboardInterrupt and normal close can all reach
-        # here — only run once.
-        if cleaned["done"]:
-            return
-        cleaned["done"] = True
-        if not state["done"]:
-            print("Aborting mission...")
-            dji.requestAbortMission()
-        try:
-            csv_file.flush(); csv_file.close()
-        except Exception:
-            pass
-        if ts:
-            finalize_trial(tag, csv_path, fig, vs, rolls, pitches, state["reached_t"])
-        dji.stopTelemetryStream()
-        print("Telemetry stopped. Done.")
-
-    # `kill <pid>` sends SIGTERM — catch it so we still finalize (raw CSV is already
-    # safe via per-tick flush; this also writes the PNG + index row before exiting).
-    def on_signal(signum, _frame):
-        print(f"\nSignal {signum} received — saving and exiting.")
-        cleanup()
-        sys.exit(0)
-
-    signal.signal(signal.SIGTERM, on_signal)
-    signal.signal(signal.SIGINT, on_signal)
-
-    try:
-        plt.show()
-    except KeyboardInterrupt:
-        print("\nInterrupted by user.")
-    finally:
-        cleanup()
+    dji.requestSendGoToWPwithPIDprecise(
+        tgt_lat, tgt_lon, alt0, 90.0, MAX_SPEED)
+ 
+    
 
 
 if __name__ == "__main__":

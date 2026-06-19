@@ -545,7 +545,7 @@ class DJIInterface:
         """Navigate to a waypoint with custom PID tuning parameters."""
         return self.requestSend(EP_TUNING, f"{latitude},{longitude},{altitude},{yaw},{kp_pos},{ki_pos},{kd_pos},{kp_yaw},{ki_yaw},{kd_yaw}")
 
-    def requestSendGoToWPwithPIDprecise(self, latitude, longitude, altitude, yaw, max_speed):
+    def requestSendGoToWPwithPIDprecise(self, latitude, longitude, altitude, yaw, speed: float = 5.0):
         """
         Args:
             latitude, longitude, altitude: Target position
@@ -555,8 +555,8 @@ class DJIInterface:
         Returns:
             int: the seq id parsed from "WAYPOINT_ACCEPTED seq=<n> ...", or None if rejected.
         """
-        response = self.requestSend(EP_GOTO_WP_PID_PRECISE, f"{latitude},{longitude},{altitude},{yaw},{max_speed}")
-        return self._parseSeq(response)
+        return self.requestSend(EP_GOTO_WP_PID_PRECISE, f"{latitude},{longitude},{altitude},{yaw},{speed}")
+        
 
     def requestCapture(self):
         """Trigger ONE H20T shutter (no image download). Returns the capture descriptor.
