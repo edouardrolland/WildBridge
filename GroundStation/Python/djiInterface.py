@@ -1028,7 +1028,7 @@ if __name__ == '__main__':
     import time
     import sys
     
-    IP_RC = "172.18.64.187"  # REPLACE WITH YOUR RC IP
+    IP_RC = "172.18.64.235"  # REPLACE WITH YOUR RC IP
     
     if len(sys.argv) > 1:
         IP_RC = sys.argv[1]
@@ -1048,18 +1048,8 @@ if __name__ == '__main__':
     print("="*60 + "\n")
     
     try:
-        while True:
-            telemetry = dji.getTelemetry()
-            
-            if telemetry:
-                # Clear screen effect by printing separator
-                print("\033[2J\033[H")
-                print(f"  Speed:       {dji.getSpeed()}")
-               
-            else:
-                print("Waiting for telemetry data...")
-            
-            time.sleep(0.1)  # Update every 500ms
+        print("Sending gimbal pitch command to -90 degrees...")
+        print(dji.requestSendGimbalPitch(-90))
             
     except KeyboardInterrupt:
         print("\n\nStopping telemetry stream...")

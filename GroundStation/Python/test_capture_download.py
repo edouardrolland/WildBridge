@@ -24,7 +24,7 @@ from djiInterface import DJIInterface, LENS_KEYS
 
 # ----------------------------------------------------------------------------
 # Hardcode the controller (RC) IP address here (the RC's WLAN address, port 8080).
-IP_RC = "192.168.1.195"
+IP_RC = "172.18.64.234"
 # ----------------------------------------------------------------------------
 
 
@@ -45,8 +45,6 @@ def main():
         return 1
     print(f"Capture OK: {capture_info}")
 
-    # Give the H20T a moment to finish writing all lenses to the SD card.
-    time.sleep(15)
 
     download_dir = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
@@ -73,7 +71,7 @@ def main():
         else:
             print(f"  {lens}: FAILED after {dt:.1f}s")
             failures.append(lens)
-        time.sleep(15)
+        
 
     if failures:
         print(f"Done with failures: {', '.join(failures)}")

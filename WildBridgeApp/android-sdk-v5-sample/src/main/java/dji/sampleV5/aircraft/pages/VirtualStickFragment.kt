@@ -102,6 +102,8 @@ class VirtualStickFragment : DJIFragment() {
     // Periodic flight-log telemetry snapshot (every 5 s, only while a session is active)
     private var telemetryLogRunnable: Runnable? = null
     private var distanceUpdateRunnable: Runnable? = null
+    private var batteryUpdateRunnable: Runnable? = null
+    private var lowBatteryRTHInfoUpdateRunnable: Runnable? = null
 
     private var isRtspStreaming = false
 
@@ -1056,7 +1058,7 @@ class VirtualStickFragment : DJIFragment() {
     @SuppressLint("SetTextI18n")
     private fun addBatteryLevelDisplay() {
         // Set up a periodic update for battery level
-        val batteryUpdateRunnable = object : Runnable {
+        batteryUpdateRunnable = object : Runnable {
             override fun run() {
                 val currentBatteryLevel = getBatteryLevel()
                 mainHandler.post {
@@ -1067,12 +1069,12 @@ class VirtualStickFragment : DJIFragment() {
         }
 
         // Start the periodic updates
-        mainHandler.post(batteryUpdateRunnable)
+        mainHandler.post(batteryUpdateRunnable!!)
     }
 
     private fun addLowBatteryRTHInfoDisplay() {
         // Set up a periodic update for low battery RTH info
-        val lowBatteryRTHInfoUpdateRunnable = object : Runnable {
+        lowBatteryRTHInfoUpdateRunnable = object : Runnable {
             override fun run() {
                 updateLowBatteryRTHInfoDisplay()
                 mainHandler.postDelayed(this, 1000) // Update every second
@@ -1080,7 +1082,7 @@ class VirtualStickFragment : DJIFragment() {
         }
 
         // Start the periodic updates
-        mainHandler.post(lowBatteryRTHInfoUpdateRunnable)
+        mainHandler.post(lowBatteryRTHInfoUpdateRunnable!!)
     }
 
     @SuppressLint("SetTextI18n")
@@ -1163,6 +1165,10 @@ class VirtualStickFragment : DJIFragment() {
         distanceUpdateRunnable = null
         telemetryLogRunnable?.let { mainHandler.removeCallbacks(it) }
         telemetryLogRunnable = null
+        batteryUpdateRunnable?.let { mainHandler.removeCallbacks(it) }
+        batteryUpdateRunnable = null
+        lowBatteryRTHInfoUpdateRunnable?.let { mainHandler.removeCallbacks(it) }
+        lowBatteryRTHInfoUpdateRunnable = null
         DroneController.manualOverrideListener = null
         KeyManager.getInstance().cancelListen(this)
     }

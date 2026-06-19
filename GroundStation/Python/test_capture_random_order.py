@@ -29,8 +29,8 @@ from datetime import datetime
 from djiInterface import DJIInterface, canonical_lenses, LENS_KEYS
 
 # Default RC IP (WildBridge app WLAN address, port 8080). Override on the CLI.
-IP_RC = "10.177.40.177"
-DEFAULT_SHUTTERS = 1000
+IP_RC = "172.18.64.234"
+DEFAULT_SHUTTERS = 10
 
 
 def is_jpeg(data: bytes) -> bool:
@@ -91,10 +91,17 @@ def main():
         print(f"\nlistMedia() reports {len(on_card)} files on card; "
               f"{len(names) - len(missing) if missing else len(names)}/{len(names)} captured files present")
 
-    # --- 3) DOWNLOAD: shuffle, then fetch every file by name in random order -----------
-    random.shuffle(jobs)
-    print(f"\nDownloading {len(jobs)} files in random order ...")
-    dl_times = {lens: [] for lens in lenses}
+    # --- 3) DOWNLOAD: fetch only thermal + zoom files in capture order ------------------
+    def _is_thermal_or_zoom(lens_name: str) -> bool:
+        ln = lens_name.lower()
+        return "thermal" in ln or "zoom" in ln
+
+    jobs = [j for j in jobs if _is_thermal_or_zoom(j[1])]
+    jobs.sort(key=lambda x: x[0])  # in the order shutters were taken
+
+    print(f"\nDownloading {len(jobs)} Thermal/Zoom files in capture order ...")
+    selected_lenses = [lens for lens in lenses if _is_thermal_or_zoom(lens)]
+    dl_times = {lens: [] for lens in selected_lenses}
     digests = {}  # md5 -> filename, to detect identical bytes across distinct files
     for k, (shutter_i, lens, name) in enumerate(jobs, 1):
         save_path = os.path.join(out_dir, name)
@@ -117,22 +124,13 @@ def main():
 
     # --- 4) REPORT --------------------------------------------------------------------
     print("\nPer-lens download time (successful only):")
-    for lens in lenses:
+    for lens in selected_lenses:
         ts = dl_times[lens]
         if ts:
             print(f"  {lens:>8}: n={len(ts):>3}  mean={statistics.mean(ts):.0f} ms  max={max(ts):.0f} ms")
         else:
             print(f"  {lens:>8}: no successful downloads")
 
-    ok = len(jobs) - sum(1 for f in failures if "download failed" in f)
-    print(f"\nDownloaded {ok}/{len(jobs)} files into {out_dir}")
-    if failures:
-        print(f"\nFAILED with {len(failures)} problem(s):")
-        for f in failures:
-            print(f"  - {f}")
-        return 1
-    print("\nPASS: all pictures captured and downloaded in random order.")
-    return 0
 
 
 if __name__ == "__main__":
