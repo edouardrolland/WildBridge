@@ -1047,12 +1047,7 @@ if __name__ == '__main__':
     print("TCP Telemetry Socket Test - Press Ctrl+C to stop")
     print("="*60 + "\n")
     
-    try:
+    while True:
         print("Sending gimbal pitch command to -90 degrees...")
-        print(dji.requestSendGimbalPitch(-90))
+        print(dji.requestWaypointStatus())
             
-    except KeyboardInterrupt:
-        print("\n\nStopping telemetry stream...")
-        dji.stopTelemetryStream()
-        print("Done.")
-

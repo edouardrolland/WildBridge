@@ -24,7 +24,7 @@ from djiInterface import DJIInterface, LENS_KEYS
 
 # ----------------------------------------------------------------------------
 # Hardcode the controller (RC) IP address here (the RC's WLAN address, port 8080).
-IP_RC = "172.18.64.234"
+IP_RC = "172.18.64.230"
 # ----------------------------------------------------------------------------
 
 

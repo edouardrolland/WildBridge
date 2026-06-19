@@ -233,6 +233,16 @@ object DroneController {
     @Volatile
     private var activeLoopIsWaypoint = false
 
+    // Which waypoint controller owns the running loop. navigateToWaypointWithPID and
+    // navigateToWaypointWithPIDprecise share activeWaypointTarget/activeLoopIsWaypoint but run
+    // DIFFERENT motion laws and interpret WaypointTarget.yaw/finalYaw differently. A hot-swap is
+    // only safe between calls of the SAME controller; swapping a target into the other controller's
+    // runnable applies the wrong motion law. So the hot-swap gate must also match this mode,
+    // otherwise it falls through to a cold restart with the correct runnable.
+    private enum class WaypointMode { PID, PID_PRECISE }
+    @Volatile
+    private var activeWaypointMode: WaypointMode? = null
+
     // Set when a target is hot-swapped into a running waypoint loop. The loop clears it on the
     // next tick by reset()-ing its PIDs, so the discontinuous jump in error doesn't kick.
     @Volatile
@@ -285,6 +295,7 @@ object DroneController {
         currentControlLoopId++
         activeWaypointTarget = null
         activeLoopIsWaypoint = false
+        activeWaypointMode = null
         waypointPidResetRequested = false
 
         activeControlLoopRunnable?.let { runnable ->
@@ -872,19 +883,23 @@ object DroneController {
         // controlLoopEnabled: that flag is shared by gotoYaw/gotoAltitude/navigateTrajectory, none
         // of which consume activeWaypointTarget — so swapping into one of those would lose the
         // command. The reset request clears the PID derivative/integral kick from the error jump.
-        if (controlLoopEnabled && activeLoopIsWaypoint) {
+        // Also require the SAME controller mode: if the running loop is navigateToWaypointWithPID's
+        // runnable, its motion law/yaw interpretation differ from this precise one, so we must NOT
+        // hot-swap into it — fall through to a cold restart with the precise runnable instead.
+        if (controlLoopEnabled && activeLoopIsWaypoint && activeWaypointMode == WaypointMode.PID_PRECISE) {
             activeWaypointTarget = newTarget
             waypointPidResetRequested = true
             return seq
         }
 
-        // No active waypoint loop — start a fresh one (this also cancels any other active loop).
-        // Set target AFTER startNewControlLoopSession() because it calls cancelActiveControlLoop()
-        // which clears activeWaypointTarget.
+        // No active waypoint loop (or a different controller is running) — start a fresh one
+        // (this also cancels any other active loop). Set target AFTER startNewControlLoopSession()
+        // because it calls cancelActiveControlLoop() which clears activeWaypointTarget.
         stopCurrentMission()
         val loopId = startNewControlLoopSession()
         activeWaypointTarget = newTarget
         activeLoopIsWaypoint = true
+        activeWaypointMode = WaypointMode.PID_PRECISE
 
         val updateInterval = 100.0  // Nominal update period (ms); real dt is measured each tick.
         val maxYawRate = maxYawRateDegS() // degrees per second, from the active drone profile
@@ -1038,19 +1053,23 @@ object DroneController {
         // controlLoopEnabled: that flag is shared by gotoYaw/gotoAltitude/navigateTrajectory, none
         // of which consume activeWaypointTarget — so swapping into one of those would lose the
         // command. The reset request clears the PID derivative/integral kick from the error jump.
-        if (controlLoopEnabled && activeLoopIsWaypoint) {
+        // Also require the SAME controller mode: if the running loop is the precise runnable, its
+        // motion law/yaw interpretation differ from this one, so we must NOT hot-swap into it —
+        // fall through to a cold restart with this runnable instead.
+        if (controlLoopEnabled && activeLoopIsWaypoint && activeWaypointMode == WaypointMode.PID) {
             activeWaypointTarget = newTarget
             waypointPidResetRequested = true
             return seq
         }
 
-        // No active waypoint loop — start a fresh one (this also cancels any other active loop).
-        // Set target AFTER startNewControlLoopSession() because it calls cancelActiveControlLoop()
-        // which clears activeWaypointTarget.
+        // No active waypoint loop (or a different controller is running) — start a fresh one
+        // (this also cancels any other active loop). Set target AFTER startNewControlLoopSession()
+        // because it calls cancelActiveControlLoop() which clears activeWaypointTarget.
         stopCurrentMission()
         val loopId = startNewControlLoopSession()
         activeWaypointTarget = newTarget
         activeLoopIsWaypoint = true
+        activeWaypointMode = WaypointMode.PID
 
         val updateInterval = 100.0  // PID/setpoint recompute period (ms); real dt measured each control tick.
         val sendIntervalMs = 100L    // Virtual-stick resend period (ms) = 10 Hz, decoupled from the 1 Hz

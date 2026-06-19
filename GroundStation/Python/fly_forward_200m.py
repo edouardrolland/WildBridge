@@ -141,7 +141,7 @@ def finalize_trial(tag, csv_path, fig, vs, rolls, pitches, reached_t):
 
 
 def main():
-    ip = "172.18.64.230"  # REPLACE WITH YOUR RC IP
+    ip = "10.101.210.186"  # REPLACE WITH YOUR RC IP
     dji = DJIInterface(ip)
     if dji.IP_RC == "":
         print("No drone IP. Pass it as an argument or ensure discovery works.")
@@ -175,7 +175,8 @@ def main():
     dji.requestAbortAll()
     time.sleep(0.5)  # let the loop tear down before re-enabling the stick
 
-    tgt_lat, tgt_lon = 65.083154, -147.710657
+    tgt_lat, tgt_lon = 65.082876, -147.709281
+
 
     # Evaluate the actual distance from the start position to the waypoint being sent.
     dlat = math.radians(tgt_lat - lat0)
@@ -187,12 +188,17 @@ def main():
     print(f"  Waypoint distance from start: {actual_distance_m:.2f} m  "
           f"(expected {DISTANCE_M:.1f} m, delta={actual_distance_m - DISTANCE_M:+.2f} m)")
 
+    
     # Enable virtual stick, then command the waypoint via the XPRIZE tuning endpoint.
     dji.requestSendEnableVirtualStick()
     dji.requestSendGoToWPwithPID(
         tgt_lat, tgt_lon, alt0, 90.0, MAX_SPEED)
- 
     
+    time.sleep(30)  # let the command take effect before starting to log
+    tgt_lat, tgt_lon = 65.082876, -147.709281
+    dji.requestSendGoToWPwithPIDprecise(
+        tgt_lat, tgt_lon, alt0, 45.0, MAX_SPEED)
+        
 
 
 if __name__ == "__main__":
