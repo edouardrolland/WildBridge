@@ -10,6 +10,7 @@ import dji.sampleV5.aircraft.models.PayloadWidgetVM
 import dji.sampleV5.aircraft.util.ToastUtils
 import dji.sdk.keyvalue.key.CameraKey
 import dji.sdk.keyvalue.key.DJIKey
+import dji.sdk.keyvalue.key.DJIKeyInfo
 import dji.sdk.keyvalue.key.KeyTools
 import dji.sdk.keyvalue.value.camera.CameraType
 import dji.sdk.keyvalue.value.camera.DCFCameraType
@@ -17,7 +18,11 @@ import dji.sdk.keyvalue.value.camera.GeneratedMediaFileInfo
 import dji.sdk.keyvalue.value.camera.LaserMeasureInformation
 import dji.sdk.keyvalue.value.camera.LaserMeasureState
 import dji.sdk.keyvalue.value.camera.LaserWorkMode
+import dji.sdk.keyvalue.value.camera.CameraVideoStreamSourceType
 import dji.sdk.keyvalue.value.camera.MediaFileType
+import dji.sdk.keyvalue.value.camera.ThermalFFCMode
+import dji.sdk.keyvalue.value.common.CameraLensType
+import dji.sdk.keyvalue.value.common.ComponentIndexType
 import dji.sdk.keyvalue.value.file.FileListRequestTimeOrderType
 import dji.v5.common.callback.CommonCallbacks
 import dji.v5.common.error.IDJIError
@@ -76,22 +81,204 @@ object Payload {
 
     init { enableLaser() }
 
-    // ==================== Thermal sensor "sun protection" ====================
+    // ==================== Thermal sensor "sun"/burning protection ====================
 
-    // Thermal sensor burning (a.k.a. sun) protection. When ON, the camera blocks/closes the shutter
-    // to stop the uncooled microbolometer being damaged by the sun crossing the FOV — the same guard
-    // DJI Pilot 2 exposes. We deliberately turn it OFF at startup: the survey flight points the
-    // gimbal down at terrain, never the sun, and the protection's auto-shutter interrupts the
-    // continuous thermal capture the bridge relies on.
-    private val sunProtectionKey: DJIKey<Boolean> =
-        CameraKey.KeyInfraredThermalCameraSensorBurningProtectionEnabled.create()
+    // Thermal sensor burning (a.k.a. sun) protection. When ON, the camera closes the IR shutter to
+    // stop the uncooled microbolometer being damaged by the sun crossing the FOV — the same guard
+    // DJI Pilot 2 exposes. We turn it OFF at startup: the survey flight points the gimbal down at
+    // terrain, never the sun, and the protection's auto-shutter interrupts the continuous thermal
+    // capture the bridge relies on.
+    //
+    // WHY the old single-key approach failed:
+    //   - It used CameraKey.Key...create() (no-arg) → KeyTools.createKey(keyInfo) → NO lens
+    //     qualifier. Burning-protection is a THERMAL-LENS-scoped key; without the lens the SDK
+    //     can't resolve the target and drops the set silently. Lens-scoped keys must be built with
+    //     KeyTools.createCameraKey(keyInfo, componentIndex, CameraLensType.CAMERA_LENS_THERMAL).
+    //   - It set only the "Sensor" key. The SDK exposes TWO independent guards; the auto-shutter is
+    //     the "Shutter" key. We clear BOTH.
+    //   - It fired once on the FC-connect edge, before the camera/IR lens was enumerated, so the set
+    //     landed on an unresolved component (same race the laser enable hits). We now RETRY.
+    //
+    // Drone/camera AGNOSTIC: we don't assume LEFT_OR_MAIN or a fixed PORT_x. We probe candidate
+    // camera component indices, act on whichever report a connected camera, and address the thermal
+    // lens by type — so the same code covers gimbal-mount and payload-port mounts across the
+    // H20T/H20N/H30T and any future IR payload.
+
+    private const val DBG = "ThermalProtect"  // grep this tag in logcat
+
+    // Camera component indices to probe for a connected (thermal-capable) camera.
+    private val cameraIndexCandidates = listOf(
+        ComponentIndexType.LEFT_OR_MAIN,
+        ComponentIndexType.RIGHT,
+        ComponentIndexType.UP,
+        ComponentIndexType.PORT_1,
+        ComponentIndexType.PORT_2,
+        ComponentIndexType.PORT_3,
+        ComponentIndexType.PORT_4
+    )
+
+    // Both burning/sun-protection guards. Either can independently close the IR shutter, so we
+    // clear both. Both are THERMAL-LENS-scoped (see createCameraKey below).
+    private val protectionKeyInfos: List<Pair<String, DJIKeyInfo<Boolean>>> = listOf(
+        "Sensor" to CameraKey.KeyInfraredThermalCameraSensorBurningProtectionEnabled,
+        "Shutter" to CameraKey.KeyInfraredThermalCameraBurningProtectionShutterEnabled
+    )
+
+    // Latches true once a thermal-lens set succeeds and read-back confirms OFF; stops the retry loop.
+    @Volatile
+    private var thermalProtectionConfirmed = false
+
+    // One-shot guard for the diagnostic lever probe (see diagThermalLevers). Re-armed per connect.
+    @Volatile
+    private var thermalDiagDone = false
 
     // Disable thermal sun/sensor-burning protection. Idempotent; safe to call on every (re)connect.
+    // Re-arms the confirm latch and kicks the retry loop.
     fun disableSunProtection() {
-        sunProtectionKey.set(
+        thermalProtectionConfirmed = false
+        thermalDiagDone = false
+        Log.i(TAG, "[$DBG] disableSunProtection() called — starting retry loop")
+        runProtectionAttempt(attempt = 1, maxAttempts = 8, intervalMs = 1500L)
+    }
+
+    // One pass: probe which cameras are connected, push BOTH protection keys OFF on the thermal lens
+    // of each, then reschedule until confirmed or attempts exhausted.
+    private fun runProtectionAttempt(attempt: Int, maxAttempts: Int, intervalMs: Long) {
+        if (thermalProtectionConfirmed) {
+            Log.i(TAG, "[$DBG] confirmed OFF — stopping (was attempt $attempt/$maxAttempts)")
+            return
+        }
+
+        val connected = cameraIndexCandidates.filter { idx ->
+            // KeyConnection: null = SDK/camera not ready yet, false = no camera, true = camera present.
+            val conn = runCatching { CameraKey.KeyConnection.create(idx).get() }.getOrNull()
+            if (conn == true) {
+                val camType = runCatching { CameraKey.KeyCameraType.create(idx).get() }.getOrNull()
+                Log.d(TAG, "[$DBG] attempt $attempt: camera CONNECTED idx=$idx type=$camType")
+            }
+            conn == true
+        }
+        Log.i(TAG, "[$DBG] attempt $attempt/$maxAttempts: connectedCameras=$connected")
+
+        if (connected.isEmpty()) {
+            Log.w(TAG, "[$DBG] attempt $attempt: no camera connected yet (lens not enumerated) — will retry")
+        }
+
+        // One-shot probe of every candidate lever the moment a camera is first reachable.
+        if (connected.isNotEmpty() && !thermalDiagDone) {
+            thermalDiagDone = true
+            diagThermalLevers(connected.first())
+        }
+
+        for (idx in connected) {
+            // Diagnostic: prove the lens dimension matters. Read the SAME key with NO lens (old
+            // broken path) vs the THERMAL lens. Expect no-lens=null/unsupported, thermal-lens=Boolean.
+            val noLensGet = runCatching {
+                CameraKey.KeyInfraredThermalCameraSensorBurningProtectionEnabled.create().get()
+            }.getOrNull()
+            Log.d(TAG, "[$DBG] idx=$idx diagnostic: Sensor get() NO-lens=$noLensGet (old path)")
+
+            for ((label, info) in protectionKeyInfos) {
+                applyProtectionOff(idx, label, info)
+            }
+        }
+
+        if (attempt < maxAttempts) {
+            mainHandler.postDelayed(
+                { runProtectionAttempt(attempt + 1, maxAttempts, intervalMs) },
+                intervalMs
+            )
+        } else {
+            Log.w(TAG, "[$DBG] retry loop exhausted after $maxAttempts attempts; confirmed=$thermalProtectionConfirmed")
+        }
+    }
+
+    // Build the THERMAL-LENS-scoped key for [idx], log the before value, set it false, then read back
+    // to verify. Sets thermalProtectionConfirmed on a confirmed OFF read-back.
+    private fun applyProtectionOff(idx: ComponentIndexType, label: String, info: DJIKeyInfo<Boolean>) {
+        val key: DJIKey<Boolean> = KeyTools.createCameraKey(info, idx, CameraLensType.CAMERA_LENS_THERMAL)
+        val before = runCatching { key.get() }.getOrNull()
+        Log.d(TAG, "[$DBG] SET idx=$idx lens=THERMAL key=$label before=$before -> false")
+        key.set(
             false,
-            onSuccess = { Log.i(TAG, "Thermal sun protection disabled") },
-            onFailure = { error -> Log.e(TAG, "Thermal sun protection disable failed: ${error.description()}") }
+            onSuccess = {
+                val after = runCatching { key.get() }.getOrNull()
+                Log.i(TAG, "[$DBG] SUCCESS idx=$idx key=$label readback=$after")
+                if (after == false || after == null) thermalProtectionConfirmed = true
+            },
+            onFailure = { error ->
+                Log.e(TAG, "[$DBG] FAILURE idx=$idx key=$label desc=${error.description()} err=$error")
+            }
+        )
+    }
+
+    // Staged probe testing the hypothesis: thermal-lens WRITE keys (burning protection, FFC) are
+    // gated on the IR lens being the ACTIVE video stream source. Prior flash showed all sets fail -483
+    // while source=WIDE_CAMERA, even set(true) (so not a bad value — a precondition).
+    //
+    // Stage 1: switch videoStreamSource -> INFRARED_CAMERA  (live feed briefly shows thermal).
+    // Stage 2: retry FFC MANUAL + both burning-protection keys with IR active; read back.
+    // Stage 3: restore the original source, then re-read to see if the change PERSISTS once IR is no
+    //          longer the active feed (tells us whether the eventual fix can switch-set-restore, or
+    //          must keep IR active for the whole flight).
+    private fun diagThermalLevers(idx: ComponentIndexType) {
+        Log.i(TAG, "[$DBG][DIAG] ===== staged thermal lever probe on idx=$idx =====")
+        val srcKey: DJIKey<CameraVideoStreamSourceType> = CameraKey.KeyCameraVideoStreamSource.create(idx)
+        val srcBefore = runCatching { srcKey.get() }.getOrNull()
+        val srcRange = runCatching { CameraKey.KeyCameraVideoStreamSourceRange.create(idx).get() }.getOrNull()
+        Log.i(TAG, "[$DBG][DIAG] stage0 source=$srcBefore range=$srcRange")
+
+        // STAGE 1
+        Log.i(TAG, "[$DBG][DIAG] stage1 set source -> INFRARED_CAMERA (live feed switches to thermal briefly)")
+        srcKey.set(
+            CameraVideoStreamSourceType.INFRARED_CAMERA,
+            onSuccess = { Log.i(TAG, "[$DBG][DIAG] stage1 source set INFRARED OK") },
+            onFailure = { e -> Log.e(TAG, "[$DBG][DIAG] stage1 source set INFRARED FAIL err=$e") }
+        )
+
+        // STAGE 2 — after the source switch settles, retry every lever.
+        mainHandler.postDelayed({
+            val srcNow = runCatching { srcKey.get() }.getOrNull()
+            Log.i(TAG, "[$DBG][DIAG] stage2 sourceNow=$srcNow — retrying levers with IR active")
+            tryThermalSet(idx, "FFC", CameraKey.KeyThermalFFCMode, ThermalFFCMode.MANUAL)
+            tryThermalSet(idx, "Sensor", CameraKey.KeyInfraredThermalCameraSensorBurningProtectionEnabled, false)
+            tryThermalSet(idx, "Shutter", CameraKey.KeyInfraredThermalCameraBurningProtectionShutterEnabled, false)
+        }, 1500L)
+
+        // STAGE 3 — restore original source, then persistence-check the values.
+        mainHandler.postDelayed({
+            Log.i(TAG, "[$DBG][DIAG] stage3 restore source -> $srcBefore")
+            if (srcBefore != null) srcKey.set(
+                srcBefore,
+                onSuccess = { Log.i(TAG, "[$DBG][DIAG] stage3 source restored OK") },
+                onFailure = { e -> Log.e(TAG, "[$DBG][DIAG] stage3 source restore FAIL err=$e") }
+            )
+            mainHandler.postDelayed({
+                val sensorAfter = runCatching {
+                    KeyTools.createCameraKey(CameraKey.KeyInfraredThermalCameraSensorBurningProtectionEnabled, idx, CameraLensType.CAMERA_LENS_THERMAL).get()
+                }.getOrNull()
+                val ffcAfter = runCatching {
+                    KeyTools.createCameraKey(CameraKey.KeyThermalFFCMode, idx, CameraLensType.CAMERA_LENS_THERMAL).get()
+                }.getOrNull()
+                Log.i(TAG, "[$DBG][DIAG] stage3 PERSISTENCE after restore: Sensor=$sensorAfter FFC=$ffcAfter")
+                Log.i(TAG, "[$DBG][DIAG] ===== probe end =====")
+            }, 1500L)
+        }, 3000L)
+    }
+
+    // Build a THERMAL-LENS-scoped key, log before, set [value], read back. Generic over value type so
+    // it serves both the Boolean protection keys and the ThermalFFCMode enum key.
+    private fun <T> tryThermalSet(idx: ComponentIndexType, label: String, info: DJIKeyInfo<T>, value: T) {
+        val key: DJIKey<T> = KeyTools.createCameraKey(info, idx, CameraLensType.CAMERA_LENS_THERMAL)
+        val before = runCatching { key.get() }.getOrNull()
+        Log.d(TAG, "[$DBG][DIAG] try $label before=$before -> $value")
+        key.set(
+            value,
+            onSuccess = {
+                val after = runCatching { key.get() }.getOrNull()
+                Log.i(TAG, "[$DBG][DIAG] $label set OK readback=$after  <<< WORKS with IR active")
+            },
+            onFailure = { e -> Log.e(TAG, "[$DBG][DIAG] $label set FAIL err=$e") }
         )
     }
 
