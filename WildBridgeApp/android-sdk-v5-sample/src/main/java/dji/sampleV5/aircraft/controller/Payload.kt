@@ -73,6 +73,25 @@ object Payload {
 
     init { enableLaser() }
 
+    // ==================== Thermal sensor "sun protection" ====================
+
+    // Thermal sensor burning (a.k.a. sun) protection. When ON, the camera blocks/closes the shutter
+    // to stop the uncooled microbolometer being damaged by the sun crossing the FOV — the same guard
+    // DJI Pilot 2 exposes. We deliberately turn it OFF at startup: the survey flight points the
+    // gimbal down at terrain, never the sun, and the protection's auto-shutter interrupts the
+    // continuous thermal capture the bridge relies on.
+    private val sunProtectionKey: DJIKey<Boolean> =
+        CameraKey.KeyInfraredThermalCameraSensorBurningProtectionEnabled.create()
+
+    // Disable thermal sun/sensor-burning protection. Idempotent; safe to call on every (re)connect.
+    fun disableSunProtection() {
+        sunProtectionKey.set(
+            false,
+            onSuccess = { Log.i(TAG, "Thermal sun protection disabled") },
+            onFailure = { error -> Log.e(TAG, "Thermal sun protection disable failed: ${error.description()}") }
+        )
+    }
+
     private val laserMeasureKey: DJIKey<LaserMeasureInformation> = CameraKey.KeyLaserMeasureInformation.create()
     private val lrfReadingLock = Any()
 

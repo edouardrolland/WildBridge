@@ -176,10 +176,20 @@ def main():
     time.sleep(0.5)  # let the loop tear down before re-enabling the stick
 
     tgt_lat, tgt_lon = 65.083154, -147.710657
-    
+
+    # Evaluate the actual distance from the start position to the waypoint being sent.
+    dlat = math.radians(tgt_lat - lat0)
+    dlon = math.radians(tgt_lon - lon0)
+    a = (math.sin(dlat / 2) ** 2
+         + math.cos(math.radians(lat0)) * math.cos(math.radians(tgt_lat))
+         * math.sin(dlon / 2) ** 2)
+    actual_distance_m = 2 * EARTH_R * math.asin(math.sqrt(a))
+    print(f"  Waypoint distance from start: {actual_distance_m:.2f} m  "
+          f"(expected {DISTANCE_M:.1f} m, delta={actual_distance_m - DISTANCE_M:+.2f} m)")
+
     # Enable virtual stick, then command the waypoint via the XPRIZE tuning endpoint.
     dji.requestSendEnableVirtualStick()
-    dji.requestSendGoToWPwithPIDprecise(
+    dji.requestSendGoToWPwithPID(
         tgt_lat, tgt_lon, alt0, 90.0, MAX_SPEED)
  
     
