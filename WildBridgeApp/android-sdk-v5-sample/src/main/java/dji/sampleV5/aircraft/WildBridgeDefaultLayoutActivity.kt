@@ -688,10 +688,6 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
         // whole-card fetch is slow and otherwise blows past the capture client's timeout).
         if (isConnected) {
             if (::mediaVM.isInitialized) Payload.warmUpMedia(mediaVM)
-            // Turn off the thermal sensor's sun/burning protection on connect — its auto-shutter
-            // interrupts the continuous thermal capture the bridge relies on. Set here (not at object
-            // init) because the SDK isn't connected yet when Payload is first touched.
-            Payload.disableSunProtection()
             // NOTE: the PORT_3 frame detector is armed from applyDetectedDroneProfile (once the
             // product resolves to M400 and PORT_3 is actually streaming), NOT here — at the connect
             // edge the product is still UNRECOGNIZED and PORT_3 has no stream yet.
