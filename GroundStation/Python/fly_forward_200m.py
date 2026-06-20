@@ -141,7 +141,7 @@ def finalize_trial(tag, csv_path, fig, vs, rolls, pitches, reached_t):
 
 
 def main():
-    ip = "172.18.64.201"  # REPLACE WITH YOUR RC IP
+    ip = "10.101.210.186"  # REPLACE WITH YOUR RC IP
     dji = DJIInterface(ip)
     if dji.IP_RC == "":
         print("No drone IP. Pass it as an argument or ensure discovery works.")
@@ -172,29 +172,33 @@ def main():
 
     # Force a COLD start so the Kp / accel overrides are actually applied (a running
     # loop would just hot-swap the target and keep the gains it already captured).
+    dji.requestAbortAll()
     time.sleep(0.5)  # let the loop tear down before re-enabling the stick
 
     tgt_lat, tgt_lon = 65.082876, -147.709281
+
+
+    # Evaluate the actual distance from the start position to the waypoint being sent.
+    dlat = math.radians(tgt_lat - lat0)
+    dlon = math.radians(tgt_lon - lon0)
+    a = (math.sin(dlat / 2) ** 2
+         + math.cos(math.radians(lat0)) * math.cos(math.radians(tgt_lat))
+         * math.sin(dlon / 2) ** 2)
+    actual_distance_m = 2 * EARTH_R * math.asin(math.sqrt(a))
+    print(f"  Waypoint distance from start: {actual_distance_m:.2f} m  "
+          f"(expected {DISTANCE_M:.1f} m, delta={actual_distance_m - DISTANCE_M:+.2f} m)")
+
     
     # Enable virtual stick, then command the waypoint via the XPRIZE tuning endpoint.
     dji.requestSendEnableVirtualStick()
     dji.requestSendGoToWPwithPID(
         tgt_lat, tgt_lon, alt0, 90.0, MAX_SPEED)
     
-    time.sleep(10)  # let the command take effect before starting to log
-    
-    for _ in range(10):
-        time.sleep(2)
-        dji.requestSendGoToWPwithPIDprecise(
-        tgt_lat, tgt_lon, alt0, 45.0, MAX_SPEED)
-        
-    
-    """
     time.sleep(30)  # let the command take effect before starting to log
     tgt_lat, tgt_lon = 65.082876, -147.709281
     dji.requestSendGoToWPwithPIDprecise(
         tgt_lat, tgt_lon, alt0, 45.0, MAX_SPEED)
-    """ 
+        
 
 
 if __name__ == "__main__":
