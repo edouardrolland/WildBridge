@@ -73,6 +73,8 @@ import dji.sdk.keyvalue.value.camera.CameraStorageInfos
 import dji.sdk.keyvalue.value.camera.CameraStorageLocation
 import dji.sdk.keyvalue.value.camera.SDCardLoadState
 import dji.sdk.keyvalue.value.camera.LaserMeasureState
+import dji.sdk.keyvalue.value.camera.ThermalTemperatureMeasureMode
+import dji.sdk.keyvalue.value.common.CameraLensType
 import dji.sdk.keyvalue.value.flightcontroller.FlightMode
 import dji.sdk.keyvalue.value.flightcontroller.FCMotorStartFailureError
 import dji.sdk.keyvalue.value.flightcontroller.GPSSignalLevel
@@ -85,6 +87,7 @@ import dji.v5.manager.datacenter.MediaDataCenter
 import dji.v5.manager.interfaces.ICameraStreamManager
 import dji.v5.et.action
 import dji.v5.et.create
+import dji.v5.et.createCamera
 import dji.v5.et.get
 import dji.v5.et.set
 import dji.v5.manager.KeyManager
@@ -137,6 +140,7 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
 
     companion object {
         private const val TAG = "WildBridgeDefaultLayout"
+        private const val TAG_THERMAL = "WildBridgeThermal"
         private const val HTTP_PORT = 8080
         private const val TELEMETRY_PORT = 8081
         private const val MEDIAMTX_WHIP_PORT = 8889  // mediamtx WebRTC port for WHIP publish
@@ -365,6 +369,7 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
     private val cameraModeKey: DJIKey<CameraMode> = KeyTools.createKey(CameraKey.KeyCameraMode, ComponentIndexType.LEFT_OR_MAIN)
     private val cameraStorageLocationKey: DJIKey<CameraStorageLocation> = KeyTools.createKey(CameraKey.KeyCameraStorageLocation, ComponentIndexType.LEFT_OR_MAIN)
     private val cameraStorageInfosKey: DJIKey<CameraStorageInfos> = KeyTools.createKey(CameraKey.KeyCameraStorageInfos, ComponentIndexType.LEFT_OR_MAIN)
+    private var thermalArmed = false
 
     private data class DroneStorageStatus(
         val label: String,
@@ -672,6 +677,49 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
         )
     }
 
+    private fun thermalCameraIndex(): ComponentIndexType =
+        if (isMatrice400()) ComponentIndexType.PORT_3 else ComponentIndexType.LEFT_OR_MAIN
+
+    private fun armThermalMeasurement() {
+        if (thermalArmed) return
+        thermalArmed = true
+        val idx = thermalCameraIndex()
+        val lens = CameraLensType.CAMERA_LENS_THERMAL
+        Log.i(TAG_THERMAL, "Arming thermal measurement on camera index=$idx lens=THERMAL")
+
+        CameraKey.KeyThermalTemperatureDataEnabled.createCamera(idx, lens).set(true,
+            onSuccess = { Log.i(TAG_THERMAL, "ThermalTemperatureDataEnabled=true OK") },
+            onFailure = { e -> Log.e(TAG_THERMAL, "set TemperatureDataEnabled failed: ${e.description()}") })
+
+        CameraKey.KeyThermalTemperatureMeasureMode.createCamera(idx, lens).set(ThermalTemperatureMeasureMode.REGION,
+            onSuccess = {
+                Log.i(TAG_THERMAL, "MeasureMode=REGION OK; setting full-frame area")
+                CameraKey.KeyThermalRegionMetersureArea.createCamera(idx, lens).set(DoubleRect(0.0, 0.0, 1.0, 1.0),
+                    onSuccess = { Log.i(TAG_THERMAL, "Region area=full-frame OK") },
+                    onFailure = { e -> Log.e(TAG_THERMAL, "set Region area failed: ${e.description()}") })
+            },
+            onFailure = { e -> Log.e(TAG_THERMAL, "set MeasureMode failed: ${e.description()}") })
+    }
+
+    private fun disarmThermalMeasurement() {
+        thermalArmed = false
+    }
+
+    private fun readThermalMaxTempNow(): Double? {
+        // Make sure the pipeline is armed even if capture is the very first thermal action.
+        armThermalMeasurement()
+        return runCatching {
+            val idx = thermalCameraIndex()
+            val lens = CameraLensType.CAMERA_LENS_THERMAL
+            val globalMax = CameraKey.KeyThermalGlobalMaxTemperature.createCamera(idx, lens).get()
+            val regionMax = CameraKey.KeyThermalRegionMetersureTemperature.createCamera(idx, lens).get()?.maxAreaTemperature
+            val maxTemp = globalMax ?: regionMax
+            Log.i(TAG_THERMAL, "[capture read] idx=$idx globalMax=$globalMax regionMax=$regionMax -> $maxTemp")
+            maxTemp
+        }.onFailure { Log.e(TAG_THERMAL, "[capture read] error: ${it.message}", it) }.getOrNull()
+    }
+    // ==================== End Thermal max-temperature readout ====================
+
     private fun setupAircraftConnectionListener() {
         aircraftConnected = flightControllerConnectionKey.get(true)
         applyAircraftConnectionState(aircraftConnected)
@@ -691,11 +739,16 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
             // NOTE: the PORT_3 frame detector is armed from applyDetectedDroneProfile (once the
             // product resolves to M400 and PORT_3 is actually streaming), NOT here — at the connect
             // edge the product is still UNRECOGNIZED and PORT_3 has no stream yet.
+            // Arm the thermal radiometric pipeline once the product type + PORT_3 payload have
+            // had time to come up, so the on-demand read at capture time is warm. This is a
+            // one-shot setup (enable temp data + region metering), not a continuous stream.
+            mainHandler.postDelayed({ armThermalMeasurement() }, 8000)
         } else {
             Payload.resetMediaWarmup()
             // Reset for the next connection so a reconnect (or a different drone) rebinds again.
             unregisterMainCamFrameDetector()
             gimbalKeysReboundForM400 = false
+            disarmThermalMeasurement()
         }
         if (isConnected && sharedPreferences.getBoolean(PREF_MOCK_VIDEO_ENABLED, false)) {
             sharedPreferences.edit().putBoolean(PREF_MOCK_VIDEO_ENABLED, false).apply()
@@ -1562,6 +1615,8 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
     override fun onDestroy() {
         detachDefaultLayoutHsiWidgets()
 
+        disarmThermalMeasurement()
+
         // Unregister system-service listeners FIRST and each on its own guard. The framework
         // LocationManager keeps locationListener in a native global, so if a later teardown
         // step throws and skips this removal, the listener pins the destroyed activity
@@ -2199,6 +2254,28 @@ class WildBridgeDefaultLayoutActivity : DefaultLayoutActivity() {
                 // Camera Capture is two-step. Capture only trips one shutter and returns a JSON
                 // descriptor naming the per-lens filenames the payload stored; the lens files stay
                 // on the SD card and are downloaded by name via /send/downloadMediaByName.
+                // Temperature-only read: NO shutter, NO download. Synchronously reads the
+                // highest temperature on the thermal feed and returns {"thermalMaxTemp": °C|null}.
+                if (method == "POST" && uri == "/send/captureTemperature") {
+                    WildBridgeFlightLogger.logCommand(uri, postData)
+                    val body: String = if (!ControlAuthority.authorizeControlCommand(source)) {
+                        "{\"error\":\"REJECTED: Safety Computer is in control.\"}"
+                    } else {
+                        val maxTemp = readThermalMaxTempNow()
+                        "{\"thermalMaxTemp\":${maxTemp ?: "null"}}"
+                    }
+                    val bodyBytes = body.toByteArray()
+                    writer.println("HTTP/1.1 200 OK")
+                    writer.println("Content-Type: application/json")
+                    writer.println("Content-Length: ${bodyBytes.size}")
+                    writer.println("Access-Control-Allow-Origin: *")
+                    writer.println()
+                    writer.print(body)
+                    writer.flush()
+                    clientSocket.close()
+                    return
+                }
+
                 if (method == "POST" && uri == "/send/captureThermalImage") {
                     WildBridgeFlightLogger.logCommand(uri, postData)
                     val body: String = if (!ControlAuthority.authorizeControlCommand(source)) {

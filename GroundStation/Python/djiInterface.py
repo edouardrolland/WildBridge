@@ -68,6 +68,7 @@ EP_WP_REACHED = "/status/waypointReached"
 EP_HOME_LOCATION = "/home/location"
 EP_CAMERA_IS_RECORDING = "/status/camera/isRecording"
 EP_CAPTURE_THERMAL_IMAGE = "/send/captureThermalImage"
+EP_CAPTURE_TEMPERATURE = "/send/captureTemperature"  # temperature-only read, no shutter
 
 # SETTER
 # HTTP POST Command Endpoints (port 8080)
@@ -295,7 +296,6 @@ class DJIInterface:
     def getZoomRatio(self):
         """Get camera zoom ratio."""
         return self.getTelemetry().get("zoomRatio", 1.0)
-    
     def getBatteryLevel(self):
         """Get battery level percentage."""
         return self.getTelemetry().get("batteryLevel", -1)
@@ -565,6 +565,7 @@ class DJIInterface:
             on-camera filename, None if that lens was not stored), else False.
 
         Download any returned filename with downloadByName().
+        For the thermal max temperature (no shutter), use requestCaptureTemperature().
         """
 
         if self.IP_RC == "":
@@ -590,6 +591,14 @@ class DJIInterface:
             print(f"Capture failed: {info}")
             return False
         return info
+
+    def requestCaptureTemperature(self):
+        """Read the highest temperature (deg C) on the thermal feed. No shutter, no download.
+
+        Returns the bridge's raw JSON response body, e.g. '{"thermalMaxTemp":21.5}'
+        (thermalMaxTemp is null if no radiometric value was available).
+        """
+        return self.requestSend(EP_CAPTURE_TEMPERATURE, "")
 
     def listMedia(self):
         """List every file on the camera's SD card (robust path — source of truth, not the
@@ -955,7 +964,7 @@ class DJIInterfaceLite:
             save_path = f"thermal_image_{timestamp}.jpg"
             
         try:
-            response = requests.post(self.baseTelemUrl + EP_CAPTURE_THERMAL_IMAGE,
+            response = requests.post(self.baseCommandUrl + EP_CAPTURE_THERMAL_IMAGE,
                                   data="",
                                   timeout=20)
 
@@ -1028,7 +1037,7 @@ if __name__ == '__main__':
     import time
     import sys
     
-    IP_RC = "172.18.64.235"  # REPLACE WITH YOUR RC IP
+    IP_RC = "172.18.64.184"  # REPLACE WITH YOUR RC IP
     
     if len(sys.argv) > 1:
         IP_RC = sys.argv[1]
@@ -1045,9 +1054,15 @@ if __name__ == '__main__':
     
     print("\n" + "="*60)
     print("TCP Telemetry Socket Test - Press Ctrl+C to stop")
-    print("="*60 + "\n")
+    print("="*60 + "\n")    
     
     while True:
-        print("Sending gimbal pitch command to -90 degrees...")
-        print(dji.requestWaypointStatus())
+        try:
+            telem = dji.getTelemetry()
+            print(telem)
+            time.sleep(1)
+        except KeyboardInterrupt:
+            print("Stopping telemetry stream...")
+            dji.stopTelemetryStream()
+            break
             
